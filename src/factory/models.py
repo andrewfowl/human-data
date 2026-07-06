@@ -1,0 +1,204 @@
+"""ORM models for the human data factory.
+
+Core entities:
+  Expert          — vetted domain contributor (CPA/CFA/analyst), qualification-gated
+  Qualification   — passed domain exam granting access to a track
+  Project         — client engagement producing one dataset (SFT / preference / eval)
+  Task            — one unit of work inside a project; may be a gold (honeypot) task
+  Submission      — an expert's answer to a task; moves through the QC pipeline
+  Review          — one review record (deterministic checks, autonomous LLM QC, or human)
+  AuditEvent      — hash-chained, append-only audit trail
+  ExportBatch     — a released dataset artifact with manifest and checksums
+"""
+
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .db import Base
+
+
+def _id() -> str:
+    return uuid.uuid4().hex
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class DomainTrack(str, enum.Enum):
+    FINANCIAL_ACCOUNTING = "financial_accounting"   # GAAP/IFRS reporting, journal entries
+    AUDIT_ASSURANCE = "audit_assurance"             # audit procedures, internal control
+    TAX = "tax"                                     # corporate & individual taxation
+    FINANCIAL_ANALYSIS = "financial_analysis"       # valuation, modeling, ratios
+    MANAGERIAL_ACCOUNTING = "managerial_accounting" # costing, budgeting, variance
+
+
+class TaskType(str, enum.Enum):
+    SFT = "sft"                 # prompt → expert-written completion
+    PREFERENCE = "preference"   # prompt → chosen vs rejected responses
+    EVAL = "eval"               # question + reference answer + grading rubric
+
+
+class ExpertStatus(str, enum.Enum):
+    PENDING = "pending"
+    QUALIFIED = "qualified"
+    SUSPENDED = "suspended"
+
+
+class TaskStatus(str, enum.Enum):
+    OPEN = "open"
+    ASSIGNED = "assigned"
+    COMPLETED = "completed"
+
+
+class SubmissionStatus(str, enum.Enum):
+    SUBMITTED = "submitted"
+    AUTO_CHECK_FAILED = "auto_check_failed"   # deterministic validators found hard failures
+    AUTO_QC_PENDING = "auto_qc_pending"       # awaiting autonomous LLM review
+    HUMAN_REVIEW = "human_review"             # sampled or gray-zone: human reviewer required
+    NEEDS_REVISION = "needs_revision"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ReviewKind(str, enum.Enum):
+    DETERMINISTIC = "deterministic"
+    AUTO_LLM = "auto_llm"
+    HUMAN = "human"
+    GOLD_CHECK = "gold_check"
+
+
+class Verdict(str, enum.Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    REVISE = "revise"
+
+
+class Expert(Base):
+    __tablename__ = "experts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    credentials: Mapped[list] = mapped_column(JSON, default=list)  # e.g. ["CPA", "CFA L3"]
+    status: Mapped[str] = mapped_column(String, default=ExpertStatus.PENDING.value)
+    is_reviewer: Mapped[bool] = mapped_column(Boolean, default=False)
+    quality_score: Mapped[float] = mapped_column(Float, default=3.5)  # 0–5 EWMA
+    approved_count: Mapped[int] = mapped_column(Integer, default=0)
+    gold_pass_count: Mapped[int] = mapped_column(Integer, default=0)
+    gold_fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    qualifications: Mapped[list["Qualification"]] = relationship(back_populates="expert")
+
+
+class Qualification(Base):
+    __tablename__ = "qualifications"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    expert_id: Mapped[str] = mapped_column(ForeignKey("experts.id"), nullable=False)
+    track: Mapped[str] = mapped_column(String, nullable=False)
+    exam_score: Mapped[float] = mapped_column(Float, nullable=False)  # 0–100
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    expert: Mapped[Expert] = relationship(back_populates="qualifications")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    client: Mapped[str] = mapped_column(String, nullable=False)
+    track: Mapped[str] = mapped_column(String, nullable=False)
+    task_type: Mapped[str] = mapped_column(String, nullable=False)
+    guidelines: Mapped[str] = mapped_column(Text, default="")
+    rubric_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_by: Mapped[str] = mapped_column(String, nullable=False)  # actor id
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    tasks: Mapped[list["Task"]] = relationship(back_populates="project")
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[dict] = mapped_column(JSON, default=dict)  # source docs, figures, constraints
+    is_gold: Mapped[bool] = mapped_column(Boolean, default=False)
+    gold_answer: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # never shown to experts
+    status: Mapped[str] = mapped_column(String, default=TaskStatus.OPEN.value)
+    assigned_to: Mapped[str | None] = mapped_column(ForeignKey("experts.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    project: Mapped[Project] = relationship(back_populates="tasks")
+    submissions: Mapped[list["Submission"]] = relationship(back_populates="task")
+
+
+class Submission(Base):
+    __tablename__ = "submissions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    expert_id: Mapped[str] = mapped_column(ForeignKey("experts.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    content: Mapped[dict] = mapped_column(JSON, nullable=False)  # shape depends on task type
+    status: Mapped[str] = mapped_column(String, default=SubmissionStatus.SUBMITTED.value)
+    sampled_for_human_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    task: Mapped[Task] = relationship(back_populates="submissions")
+    reviews: Mapped[list["Review"]] = relationship(back_populates="submission")
+
+
+class Review(Base):
+    __tablename__ = "reviews"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    submission_id: Mapped[str] = mapped_column(ForeignKey("submissions.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    reviewer_id: Mapped[str] = mapped_column(String, nullable=False)  # expert id or engine id
+    verdict: Mapped[str] = mapped_column(String, nullable=False)
+    overall_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0–5
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)  # criterion scores, findings, flags
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    submission: Mapped[Submission] = relationship(back_populates="reviews")
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, unique=True, default=_id)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    prev_hash: Mapped[str] = mapped_column(String, nullable=False)
+    hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ExportBatch(Base):
+    __tablename__ = "export_batches"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String, nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String, nullable=True)  # dual control
+    path: Mapped[str | None] = mapped_column(String, nullable=True)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String, default="pending_approval")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
