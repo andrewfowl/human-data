@@ -31,6 +31,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class Role(str, enum.Enum):
+    ADMIN = "admin"        # internal owner: everything, incl. users/keys/firms/billing
+    OPS = "ops"            # internal PM: experts, projects, tasks, exports, billing ops
+    REVIEWER = "reviewer"  # human QC reviewer (linked to an expert record)
+    EXPERT = "expert"      # contributor (linked to an expert record)
+    CLIENT = "client"      # firm-side read access, scoped to their firm
+
+
+class BillingMode(str, enum.Enum):
+    EXTERNAL = "external"  # invoiced outside the system; usage/invoices tracked within
+    STRIPE = "stripe"      # embedded Stripe billing (customer + invoices + webhook)
+
+
+class InvoiceStatus(str, enum.Enum):
+    DRAFT = "draft"
+    ISSUED_EXTERNAL = "issued_external"  # external mode: handed to the firm's AP process
+    OPEN = "open"                        # stripe mode: pushed to Stripe, awaiting payment
+    PAID = "paid"
+    VOID = "void"
+
+
 class DomainTrack(str, enum.Enum):
     FINANCIAL_ACCOUNTING = "financial_accounting"   # GAAP/IFRS reporting, journal entries
     AUDIT_ASSURANCE = "audit_assurance"             # audit procedures, internal control
@@ -80,6 +101,50 @@ class Verdict(str, enum.Enum):
     REVISE = "revise"
 
 
+class Firm(Base):
+    """A client organization buying datasets (the billable party)."""
+
+    __tablename__ = "firms"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    billing_email: Mapped[str] = mapped_column(String, nullable=False)
+    billing_mode: Mapped[str] = mapped_column(String, default=BillingMode.EXTERNAL.value)
+    currency: Mapped[str] = mapped_column(String, default="usd")
+    external_reference: Mapped[str] = mapped_column(String, default="")  # PO / AP account no.
+    stripe_customer_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class User(Base):
+    """An authenticated principal (internal staff or firm-side client user)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    firm_id: Mapped[str | None] = mapped_column(ForeignKey("firms.id"), nullable=True)
+    expert_id: Mapped[str | None] = mapped_column(ForeignKey("experts.id"), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ApiKey(Base):
+    """Bearer credential. Only the SHA-256 of the key is stored."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    prefix: Mapped[str] = mapped_column(String, nullable=False)  # display hint, e.g. hdf_a1b2
+    key_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Expert(Base):
     __tablename__ = "experts"
 
@@ -116,7 +181,7 @@ class Project(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    client: Mapped[str] = mapped_column(String, nullable=False)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False)
     track: Mapped[str] = mapped_column(String, nullable=False)
     task_type: Mapped[str] = mapped_column(String, nullable=False)
     guidelines: Mapped[str] = mapped_column(Text, default="")
@@ -188,6 +253,64 @@ class AuditEvent(Base):
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     prev_hash: Mapped[str] = mapped_column(String, nullable=False)
     hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class RateCard(Base):
+    """Per-firm price per approved record, by task type. Firm-less rows are defaults."""
+
+    __tablename__ = "rate_cards"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    firm_id: Mapped[str | None] = mapped_column(ForeignKey("firms.id"), nullable=True)
+    task_type: Mapped[str] = mapped_column(String, nullable=False)
+    unit_price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class UsageEvent(Base):
+    """One billable unit. Emitted when a (non-gold) record is approved.
+
+    `task_id` is unique per kind so a task can never be billed twice, even if a
+    revised submission is approved later.
+    """
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    submission_id: Mapped[str] = mapped_column(ForeignKey("submissions.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String, default="approved_record")
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    unit_price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    currency: Mapped[str] = mapped_column(String, default="usd")
+    invoice_id: Mapped[str | None] = mapped_column(ForeignKey("invoices.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Invoice(Base):
+    __tablename__ = "invoices"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    number: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)  # billing mode at issuance
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    subtotal_cents: Mapped[int] = mapped_column(Integer, default=0)
+    currency: Mapped[str] = mapped_column(String, default="usd")
+    status: Mapped[str] = mapped_column(String, default=InvoiceStatus.DRAFT.value)
+    line_items: Mapped[list] = mapped_column(JSON, default=list)
+    stripe_invoice_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    hosted_invoice_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_paid_reference: Mapped[str | None] = mapped_column(String, nullable=True)
+    issued_by: Mapped[str] = mapped_column(String, nullable=False)
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

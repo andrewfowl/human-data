@@ -14,9 +14,11 @@ import json
 
 import typer
 
-from . import audit as audit_mod, db as database, export as export_mod
+from . import audit as audit_mod, auth as auth_mod, db as database, export as export_mod
+from .billing import service as billing_mod
 from .models import (
-    DomainTrack, Expert, ExpertStatus, Project, Qualification, Task, TaskType,
+    BillingMode, DomainTrack, Expert, ExpertStatus, Firm, Project, Qualification,
+    Role, Task, TaskType, User,
 )
 from .qc import engine
 from .rubrics import default_rubric_for
@@ -85,6 +87,56 @@ def export(project_id: str, requested_by: str = typer.Option(...),
 
 
 @app.command()
+def bootstrap_admin(name: str = typer.Option(...), email: str = typer.Option(...)):
+    """Create the first admin user and print their API key (once)."""
+    database.init_db()
+    db = database.session()
+    try:
+        from sqlalchemy import func, select
+        if db.execute(select(func.count()).select_from(User)).scalar():
+            typer.echo("users already exist; use the API to add more", err=True)
+            raise typer.Exit(1)
+        user = User(name=name, email=email, role=Role.ADMIN.value)
+        db.add(user)
+        db.flush()
+        key = auth_mod.issue_key(db, user)
+        audit_mod.record(db, actor=user.id, action="user.bootstrapped",
+                         entity_type="user", entity_id=user.id, payload={"email": email})
+        db.commit()
+        typer.echo(json.dumps({"user_id": user.id, "api_key": key,
+                               "note": "store this key now; it is not retrievable later"},
+                              indent=2))
+    finally:
+        db.close()
+
+
+@app.command()
+def invoice(firm_id: str, period_start: str = typer.Option(..., help="ISO date, inclusive"),
+            period_end: str = typer.Option(..., help="ISO date, exclusive"),
+            issued_by: str = typer.Option("ops-admin")):
+    """Generate an invoice for a firm's uninvoiced usage in a period."""
+    from datetime import datetime, timezone
+
+    db = database.session()
+    try:
+        firm = db.get(Firm, firm_id)
+        if firm is None:
+            typer.echo("firm not found", err=True)
+            raise typer.Exit(1)
+        start = datetime.fromisoformat(period_start).replace(tzinfo=timezone.utc)
+        end = datetime.fromisoformat(period_end).replace(tzinfo=timezone.utc)
+        inv = billing_mod.generate_invoice(db, firm=firm, period_start=start,
+                                           period_end=end, issued_by=issued_by)
+        typer.echo(json.dumps({"invoice": inv.number, "status": inv.status,
+                               "subtotal_cents": inv.subtotal_cents,
+                               "line_items": inv.line_items,
+                               "hosted_invoice_url": inv.hosted_invoice_url},
+                              indent=2, default=str))
+    finally:
+        db.close()
+
+
+@app.command()
 def seed_demo():
     """Seed a demo SFT project and drive three submissions through the pipeline."""
     database.init_db()
@@ -110,9 +162,17 @@ def seed_demo():
         audit_mod.record(db, actor=ops, action="expert.created", entity_type="expert",
                          entity_id=bob.id, payload={"seed": True})
 
+        firm = Firm(name="Demo Lab", billing_email="ap@demo-lab.example.com",
+                    billing_mode=BillingMode.EXTERNAL.value,
+                    external_reference="PO-2026-0042")
+        db.add(firm)
+        db.flush()
+        audit_mod.record(db, actor=ops, action="firm.created", entity_type="firm",
+                         entity_id=firm.id, payload={"seed": True})
+
         project = Project(
             name="ASC 606 revenue recognition SFT set",
-            client="demo-lab",
+            firm_id=firm.id,
             track=DomainTrack.FINANCIAL_ACCOUNTING.value,
             task_type=TaskType.SFT.value,
             guidelines="Write responses a senior technical accountant would sign off on.",
@@ -199,6 +259,7 @@ def seed_demo():
         })
 
         typer.echo(json.dumps({
+            "firm_id": firm.id,
             "project_id": project.id,
             "experts": {"author": alice.id, "reviewer": bob.id},
             "submissions": [
@@ -208,6 +269,7 @@ def seed_demo():
                 f"hdf control-report {project.id}",
                 "POST /submissions/<id>/human-review for any items in human_review",
                 f"hdf export {project.id} --requested-by ops-admin --approved-by {bob.id}",
+                f"hdf invoice {firm.id} --period-start 2026-01-01 --period-end 2027-01-01",
             ],
         }, indent=2))
     finally:

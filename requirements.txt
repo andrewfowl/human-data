@@ -1,0 +1,6 @@
+fastapi>=0.110
+sqlalchemy>=2.0
+pydantic[email]>=2.5
+anthropic>=0.40
+stripe>=10
+psycopg2-binary>=2.9

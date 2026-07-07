@@ -23,7 +23,9 @@ from sqlalchemy.orm import Session
 
 from . import audit, controls
 from .config import settings
-from .models import ExportBatch, Project, Review, ReviewKind, Submission, SubmissionStatus, Task
+from .models import (
+    ExportBatch, Firm, Project, Review, ReviewKind, Submission, SubmissionStatus, Task,
+)
 
 
 class ExportError(Exception):
@@ -119,9 +121,11 @@ def approve_and_materialize(db: Session, *, batch: ExportBatch, approved_by: str
         _write_jsonl(chat_path, [_to_chat(r) for r in records])
         files[chat_path.name] = _sha256(chat_path)
 
+    firm = db.get(Firm, project.firm_id)
     manifest = {
         **batch.manifest,
-        "project": {"id": project.id, "name": project.name, "client": project.client,
+        "project": {"id": project.id, "name": project.name,
+                    "firm": {"id": firm.id, "name": firm.name},
                     "track": project.track, "task_type": project.task_type},
         "record_count": len(records),
         "files": files,

@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import audit, controls, validators
+from ..billing import service as billing
 from ..config import settings
 from ..models import (
     Expert, Project, Review, ReviewKind, Submission, SubmissionStatus, Task,
@@ -140,6 +141,7 @@ def process(db: Session, sub: Submission) -> Submission:
         task.status = TaskStatus.COMPLETED.value
         expert.approved_count += 1
         controls.update_quality_score(db, expert, result.overall_score)
+        billing.record_approved_record(db, project=project, task=task, submission=sub)
         outcome = "auto_approved"
 
     audit.record(db, actor=result.reviewer_id, action=f"submission.{outcome}",
@@ -181,6 +183,7 @@ def human_review(db: Session, *, submission: Submission, reviewer: Expert,
         task.status = TaskStatus.COMPLETED.value
         author.approved_count += 1
         controls.update_quality_score(db, author, overall if overall is not None else 4.0)
+        billing.record_approved_record(db, project=project, task=task, submission=submission)
     elif verdict == Verdict.REVISE.value:
         submission.status = SubmissionStatus.NEEDS_REVISION.value
     else:

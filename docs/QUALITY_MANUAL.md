@@ -124,10 +124,25 @@ flags itself `OFFLINE_FALLBACK`, and the engine routes the submission to human
 review. Automation failures therefore increase human oversight rather than
 bypassing it.
 
-## 6. Known limitations / roadmap
+## 6. Billing controls (v0.2)
 
-- Actor identity is a header (`X-Actor-Id`); production deployments must put
-  real authentication (OIDC/API keys) in front and bind actor ids to it.
+- **B1 — Metering integrity.** A billable usage event is emitted only by the
+  QC engine on approval of a non-gold task, priced from the firm's rate card
+  (default rates otherwise), and is unique per task — revisions can never
+  double-bill. Gold/calibration tasks are never billable.
+- **B2 — Invoice completeness.** Invoice generation sweeps all uninvoiced
+  usage in the period and permanently attaches each event to the invoice;
+  the same usage cannot appear on two invoices.
+- **B3 — Settlement traceability.** External-mode invoices track settlement
+  in-app (`issued_external` → `paid` with the AP reference); Stripe-mode
+  invoices settle only via signature-verified webhook events. All transitions
+  are audit-chained.
+- **B4 — Client transparency.** Firm users can read their own usage ledger,
+  billing summary, and invoices at any time — and nothing belonging to any
+  other firm.
+
+## 7. Known limitations / roadmap
+
 - Gold matching is keyword-coverage; a rubric-based LLM gold grader would
   raise sensitivity.
 - Inter-rater reliability (human vs auto-QC agreement, reviewer-pair kappa) is

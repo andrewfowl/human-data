@@ -6,12 +6,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-# Tests always run the offline heuristic reviewer — deterministic, no network.
+# Tests always run the offline heuristic reviewer — deterministic, no network —
+# and header-based dev auth (auth-enabled behavior is tested explicitly).
 os.environ["HDF_QC_OFFLINE"] = "1"
+os.environ["HDF_AUTH_DISABLED"] = "1"
 
 from factory import db as database  # noqa: E402
 from factory.models import (  # noqa: E402
-    DomainTrack, Expert, ExpertStatus, Project, Qualification, Task, TaskType,
+    BillingMode, DomainTrack, Expert, ExpertStatus, Firm, Project, Qualification,
+    Task, TaskType,
 )
 from factory.rubrics import default_rubric_for  # noqa: E402
 
@@ -49,8 +52,18 @@ def reviewer(db):
 
 
 @pytest.fixture()
-def project(db):
-    p = Project(name="Test project", client="lab", track=DomainTrack.FINANCIAL_ACCOUNTING.value,
+def firm(db):
+    f = Firm(name="Test Lab", billing_email="ap@lab.example.com",
+             billing_mode=BillingMode.EXTERNAL.value)
+    db.add(f)
+    db.commit()
+    return f
+
+
+@pytest.fixture()
+def project(db, firm):
+    p = Project(name="Test project", firm_id=firm.id,
+                track=DomainTrack.FINANCIAL_ACCOUNTING.value,
                 task_type=TaskType.SFT.value, rubric_id=default_rubric_for("sft"),
                 created_by="ops")
     db.add(p)

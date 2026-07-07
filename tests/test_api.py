@@ -6,12 +6,34 @@ from tests.conftest import GOOD_SFT
 
 HDR = {"X-Actor-Id": "ops-admin"}
 
+_counter = [0]
+
+
+def _n():
+    _counter[0] += 1
+    return _counter[0]
+
 
 @pytest.fixture()
 def client(db):
     # `db` fixture has already pointed the engine at a fresh temp database.
     with TestClient(app) as c:
         yield c
+
+
+def _make_firm(client, name="Lab"):
+    r = client.post("/firms", json={"name": name, "billing_email": "ap@lab.example.com"},
+                    headers=HDR)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _make_project(client, firm_id):
+    r = client.post("/projects", json={"name": "P", "firm_id": firm_id,
+                                       "track": "financial_accounting", "task_type": "sft"},
+                    headers=HDR)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
 
 
 def _onboard_expert(client, email, is_reviewer=False):
@@ -30,10 +52,7 @@ def test_full_workflow_over_http(client, tmp_path):
     author = _onboard_expert(client, "author@example.com")
     reviewer = _onboard_expert(client, "reviewer@example.com", is_reviewer=True)
 
-    r = client.post("/projects", json={"name": "P", "client": "lab",
-                                       "track": "financial_accounting", "task_type": "sft"},
-                    headers=HDR)
-    project_id = r.json()["id"]
+    project_id = _make_project(client, _make_firm(client, name="Lab-%d" % _n()))
 
     r = client.post(f"/projects/{project_id}/tasks",
                     json={"prompt": "Explain ASC 606 allocation."}, headers=HDR)
@@ -86,10 +105,7 @@ def test_unqualified_assignment_rejected(client):
     r = client.post("/experts", json={"name": "N", "email": "new@example.com",
                                       "credentials": []}, headers=HDR)
     novice = r.json()["id"]
-    r = client.post("/projects", json={"name": "P", "client": "lab",
-                                       "track": "financial_accounting", "task_type": "sft"},
-                    headers=HDR)
-    project_id = r.json()["id"]
+    project_id = _make_project(client, _make_firm(client, name="Lab-%d" % _n()))
     r = client.post(f"/projects/{project_id}/tasks", json={"prompt": "x"}, headers=HDR)
     task_id = r.json()["id"]
     r = client.post(f"/tasks/{task_id}/assign/{novice}", headers=HDR)
@@ -98,10 +114,7 @@ def test_unqualified_assignment_rejected(client):
 
 
 def test_gold_answer_hidden_from_task_endpoint(client):
-    r = client.post("/projects", json={"name": "P", "client": "lab",
-                                       "track": "financial_accounting", "task_type": "sft"},
-                    headers=HDR)
-    project_id = r.json()["id"]
+    project_id = _make_project(client, _make_firm(client, name="Lab-%d" % _n()))
     r = client.post(f"/projects/{project_id}/tasks",
                     json={"prompt": "gold q", "is_gold": True,
                           "gold_answer": {"must_include": ["secret"]}}, headers=HDR)

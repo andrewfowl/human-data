@@ -61,6 +61,41 @@ heuristic reviewer runs instead. Fallback reviews are flagged
 human reviewer, so degraded automation degrades to more human oversight, not
 less.
 
+## Multi-tenancy, auth, and billing (v0.2)
+
+**Firms.** Every project belongs to a `Firm` — the billable client
+organization. Firm-side users get read-only, firm-scoped access to their
+projects, control reports, usage, and invoices.
+
+**Auth.** Bearer API keys (`Authorization: Bearer hdf_...`); only the SHA-256
+of a key is stored, and keys are shown once at issuance. Roles: `admin`
+(everything), `ops` (production + billing operations), `reviewer` (review
+queue, may only review as themselves), `expert` (may only submit as
+themselves), `client` (firm-scoped read access). Cold start: `POST /bootstrap`
+creates the first admin + key while the user table is empty. Set
+`HDF_AUTH_DISABLED=1` for local dev / tests (header-based identity).
+
+**Billing — two modes per firm:**
+
+- `external` — the firm is invoiced *outside* the system (their AP process,
+  wire, netting). The factory still meters every billable unit, generates
+  numbered invoice records with line items, and tracks settlement in-app
+  (`issued_external` → `paid` via `POST /invoices/{id}/external-payment` with
+  the AP reference), so finance has full visibility even though money moves
+  elsewhere.
+- `stripe` — embedded Stripe billing: the firm becomes a Stripe customer,
+  invoice generation pushes line items and a `send_invoice` Stripe invoice
+  (hosted invoice URL returned), and `POST /billing/stripe/webhook`
+  (signature-verified) flips invoices to `paid`/`void` on Stripe events.
+  Without `STRIPE_SECRET_KEY` a deterministic fake gateway runs, so the whole
+  flow works offline.
+
+**Metering.** One usage event per approved non-gold task — a task revised and
+re-approved is never double-billed, and gold/calibration items are always
+free. Prices come from the firm's rate card (`POST /firms/{id}/rate-cards`),
+falling back to configured defaults (`HDF_RATE_SFT_CENTS` etc.). Every usage
+event and invoice transition is written to the hash-chained audit trail.
+
 ## Quickstart
 
 ```bash
@@ -92,9 +127,10 @@ pytest        # 45 tests, fully offline
 - `GET /projects/{id}/control-report`, `POST /projects/{id}/exports`,
   `POST /exports/{id}/approve` — gate 5
 - `GET /audit/verify`, `GET /metrics`
-
-Mutating endpoints take an `X-Actor-Id` header for audit attribution — swap in
-real authentication before production.
+- `POST /bootstrap`, `POST /users`, `POST /users/{id}/revoke` — identity
+- `POST /firms`, `POST /firms/{id}/rate-cards`, `GET /firms/{id}/billing`,
+  `GET /firms/{id}/usage`, `POST /firms/{id}/invoices`,
+  `POST /invoices/{id}/external-payment`, `POST /billing/stripe/webhook` — billing
 
 ## Dataset formats
 
@@ -125,6 +161,28 @@ src/factory/
 docs/QUALITY_MANUAL.md   control objectives and operating procedures
 tests/                   45 offline tests
 ```
+
+## Deploying on Vercel
+
+The repo deploys as-is (`vercel deploy` or the Vercel MCP/CLI): `api/index.py`
+exposes the FastAPI app, `vercel.json` rewrites all routes to it. After the
+first deploy:
+
+1. **Database** — set `DATABASE_URL` (or `POSTGRES_URL` / `HDF_DATABASE_URL`)
+   to a hosted Postgres (Neon / Supabase / Vercel Postgres) in the project's
+   environment variables. Without it the app runs in **ephemeral demo mode**
+   (SQLite in `/tmp`, reset on each cold start).
+2. **Bootstrap** — `POST /bootstrap` with `{name, email}` to get the first
+   admin API key.
+3. **QC reviews** — set `ANTHROPIC_API_KEY` to enable the autonomous reviewer
+   (otherwise the conservative offline fallback routes everything to human
+   review).
+4. **Stripe (optional)** — set `STRIPE_SECRET_KEY` and
+   `STRIPE_WEBHOOK_SECRET`, and point a Stripe webhook (events
+   `invoice.paid`, `invoice.voided`) at `/billing/stripe/webhook`.
+
+Note: export files are written to `/tmp` on Vercel (ephemeral). For production
+releases run `hdf export` from a durable environment, or mount object storage.
 
 See [docs/QUALITY_MANUAL.md](docs/QUALITY_MANUAL.md) for the control
 objectives, rubric definitions, and operating procedures.
