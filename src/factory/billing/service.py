@@ -196,6 +196,76 @@ def handle_stripe_event(db: Session, event: dict) -> dict:
     return {"handled": True, "invoice_id": invoice.id, "status": invoice.status}
 
 
+def reconciliation_report(db: Session, firm: Firm,
+                          period_start: datetime | None = None,
+                          period_end: datetime | None = None) -> dict:
+    """Three-way tie-out for a firm: metered usage vs invoiced vs settled.
+
+    `clean` is true when every metered cent in the window is on an invoice and
+    every issued invoice is either awaiting payment or paid — i.e. no leakage
+    between production, invoicing, and cash.
+    """
+    uq = select(UsageEvent).where(UsageEvent.firm_id == firm.id)
+    iq = select(Invoice).where(Invoice.firm_id == firm.id)
+    if period_start:
+        uq = uq.where(UsageEvent.created_at >= period_start)
+        iq = iq.where(Invoice.created_at >= period_start)
+    if period_end:
+        uq = uq.where(UsageEvent.created_at < period_end)
+        iq = iq.where(Invoice.created_at < period_end)
+    events = db.execute(uq).scalars().all()
+    invoices = db.execute(iq).scalars().all()
+
+    metered = sum(e.amount_cents for e in events)
+    metered_invoiced = sum(e.amount_cents for e in events if e.invoice_id)
+    metered_uninvoiced = metered - metered_invoiced
+    issued = sum(i.subtotal_cents for i in invoices
+                 if i.status != InvoiceStatus.VOID.value)
+    paid = sum(i.subtotal_cents for i in invoices
+               if i.status == InvoiceStatus.PAID.value)
+    outstanding = sum(i.subtotal_cents for i in invoices if i.status in (
+        InvoiceStatus.ISSUED_EXTERNAL.value, InvoiceStatus.OPEN.value))
+    voided = sum(i.subtotal_cents for i in invoices
+                 if i.status == InvoiceStatus.VOID.value)
+
+    per_project: dict[str, dict] = {}
+    for e in events:
+        row = per_project.setdefault(e.project_id, {
+            "project_id": e.project_id, "metered_cents": 0,
+            "invoiced_cents": 0, "uninvoiced_cents": 0, "records": 0,
+        })
+        row["metered_cents"] += e.amount_cents
+        row["records"] += e.quantity
+        if e.invoice_id:
+            row["invoiced_cents"] += e.amount_cents
+        else:
+            row["uninvoiced_cents"] += e.amount_cents
+    for row in per_project.values():
+        project = db.get(Project, row["project_id"])
+        row["project_name"] = project.name if project else None
+
+    return {
+        "firm_id": firm.id,
+        "firm_name": firm.name,
+        "billing_mode": firm.billing_mode,
+        "currency": firm.currency,
+        "period_start": period_start.isoformat() if period_start else None,
+        "period_end": period_end.isoformat() if period_end else None,
+        "metered_cents": metered,
+        "metered_invoiced_cents": metered_invoiced,
+        "metered_uninvoiced_cents": metered_uninvoiced,
+        "invoiced_cents": issued,
+        "paid_cents": paid,
+        "outstanding_cents": outstanding,
+        "voided_cents": voided,
+        "invoiced_not_paid_cents": issued - paid,
+        "per_project": sorted(per_project.values(), key=lambda r: r["project_id"]),
+        "invoices": [{"number": i.number, "status": i.status,
+                      "subtotal_cents": i.subtotal_cents} for i in invoices],
+        "clean": metered_uninvoiced == 0 and metered_invoiced == issued,
+    }
+
+
 def firm_billing_summary(db: Session, firm: Firm) -> dict:
     uninvoiced = db.execute(
         select(func.coalesce(func.sum(UsageEvent.amount_cents), 0), func.count())

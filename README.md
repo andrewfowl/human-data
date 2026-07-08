@@ -181,8 +181,23 @@ first deploy:
    `STRIPE_WEBHOOK_SECRET`, and point a Stripe webhook (events
    `invoice.paid`, `invoice.voided`) at `/billing/stripe/webhook`.
 
-Note: export files are written to `/tmp` on Vercel (ephemeral). For production
-releases run `hdf export` from a durable environment, or mount object storage.
+5. **Durable exports (recommended)** — set `HDF_EXPORT_S3_BUCKET` (plus
+   `HDF_EXPORT_S3_ENDPOINT` for Cloudflare R2/MinIO, `HDF_EXPORT_S3_PREFIX`,
+   and standard AWS credentials). Released batches — data files first, then
+   the manifest — are uploaded to object storage and the manifest records the
+   bucket/keys. Without a bucket, exports stay on the local filesystem
+   (`/tmp` on Vercel — ephemeral).
+
+**Migrations** — the schema ships as an Alembic baseline
+(`migrations/versions/`). On a fresh production database run
+`alembic upgrade head` (it resolves the same `DATABASE_URL` the app uses);
+future schema changes are added as revisions. `init_db`/`create_all` remains
+for local dev and the ephemeral demo mode.
+
+**Reconciliation** — `GET /firms/{id}/reconciliation` (firm-scoped) and
+`GET /billing/reconciliation` (ops-wide) tie out metered usage vs invoiced vs
+paid per project and per firm, flagging any leakage between production,
+invoicing, and cash (`clean: false`).
 
 See [docs/QUALITY_MANUAL.md](docs/QUALITY_MANUAL.md) for the control
 objectives, rubric definitions, and operating procedures.

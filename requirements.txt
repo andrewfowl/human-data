@@ -4,3 +4,4 @@ pydantic[email]>=2.5
 anthropic>=0.40
 stripe>=10
 psycopg2-binary>=2.9
+boto3>=1.34

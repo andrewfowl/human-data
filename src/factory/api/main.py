@@ -532,6 +532,35 @@ def record_external_payment(invoice_id: str, body: ExternalPaymentIn,
     return _invoice_out(inv)
 
 
+@app.get("/firms/{firm_id}/reconciliation")
+def firm_reconciliation(firm_id: str, period_start: datetime | None = None,
+                        period_end: datetime | None = None,
+                        actor: auth.Actor = Depends(any_authenticated),
+                        db: Session = Depends(get_db)):
+    auth.assert_firm_access(actor, firm_id)
+    firm = _get_or_404(db, Firm, firm_id)
+    return billing.reconciliation_report(db, firm, period_start, period_end)
+
+
+@app.get("/billing/reconciliation")
+def global_reconciliation(period_start: datetime | None = None,
+                          period_end: datetime | None = None,
+                          actor: auth.Actor = Depends(internal),
+                          db: Session = Depends(get_db)):
+    firms = db.execute(select(Firm)).scalars().all()
+    reports = [billing.reconciliation_report(db, f, period_start, period_end)
+               for f in firms]
+    return {
+        "firms": reports,
+        "totals": {
+            k: sum(r[k] for r in reports)
+            for k in ("metered_cents", "metered_uninvoiced_cents", "invoiced_cents",
+                      "paid_cents", "outstanding_cents")
+        },
+        "all_clean": all(r["clean"] for r in reports),
+    }
+
+
 @app.post("/billing/stripe/webhook")
 async def stripe_webhook(request: Request, db: Session = Depends(get_db),
                          stripe_signature: str | None = Header(None)):

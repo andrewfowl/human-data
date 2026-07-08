@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from . import audit, controls
 from .config import settings
+from .storage import ExportStorage, get_storage
 from .models import (
     ExportBatch, Firm, Project, Review, ReviewKind, Submission, SubmissionStatus, Task,
 )
@@ -99,10 +100,13 @@ def request_export(db: Session, *, project: Project, requested_by: str) -> Expor
 
 
 def approve_and_materialize(db: Session, *, batch: ExportBatch, approved_by: str,
-                            out_dir: str | None = None) -> ExportBatch:
+                            out_dir: str | None = None,
+                            storage: "ExportStorage | None" = None) -> ExportBatch:
     if batch.status != "pending_approval":
         raise ExportError(f"batch is in status '{batch.status}'")
     controls.assert_export_dual_control(batch.requested_by, approved_by)
+    if storage is None:
+        storage = get_storage()
 
     project: Project = db.get(Project, batch.project_id)
     rows = _approved_rows(db, project)
@@ -134,7 +138,15 @@ def approve_and_materialize(db: Session, *, batch: ExportBatch, approved_by: str
         "requested_by": batch.requested_by,
         "approved_by": approved_by,
     }
+    if storage is not None:
+        # Data files first, then the manifest (which references their keys),
+        # so a partially-failed upload can never look like a complete release.
+        storage_block = storage.upload_batch(base, batch.id)
+        manifest["storage"] = storage_block
     (base / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    if storage is not None:
+        manifest_upload = storage.upload_batch(base, batch.id, only={"manifest.json"})
+        storage_block["keys"].update(manifest_upload["keys"])
 
     batch.approved_by = approved_by
     batch.path = str(base)
@@ -142,7 +154,8 @@ def approve_and_materialize(db: Session, *, batch: ExportBatch, approved_by: str
     batch.status = "released"
     audit.record(db, actor=approved_by, action="export.released",
                  entity_type="export_batch", entity_id=batch.id,
-                 payload={"record_count": len(records), "files": files})
+                 payload={"record_count": len(records), "files": files,
+                          "storage": manifest.get("storage", {}).get("backend", "local")})
     db.commit()
     return batch
 

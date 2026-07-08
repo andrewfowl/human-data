@@ -125,3 +125,36 @@ def test_billing_summary(db, firm, task, qualified_expert, reviewer):
     summary = billing.firm_billing_summary(db, firm)
     assert summary["uninvoiced"]["events"] == 0
     assert summary["outstanding_cents"] == settings.default_rates_cents["sft"]
+
+
+def test_reconciliation_report(db, firm, project, task, qualified_expert, reviewer):
+    # one approved+invoiced task, one approved+uninvoiced task
+    _approve(db, task, qualified_expert, reviewer)
+    inv = billing.generate_invoice(db, firm=firm, period_start=WIDE_START,
+                                   period_end=WIDE_END, issued_by="ops")
+    t2 = Task(project_id=project.id, prompt="A second task prompt for recon")
+    db.add(t2)
+    db.commit()
+    sub2 = engine.submit(db, task=t2, expert=qualified_expert, content=dict(
+        GOOD_SFT, response=GOOD_SFT["response"] + " Additional distinct analysis text."))
+    engine.human_review(db, submission=sub2, reviewer=reviewer, verdict="pass")
+
+    rate = settings.default_rates_cents["sft"]
+    r = billing.reconciliation_report(db, firm)
+    assert r["metered_cents"] == 2 * rate
+    assert r["metered_invoiced_cents"] == rate
+    assert r["metered_uninvoiced_cents"] == rate
+    assert r["invoiced_cents"] == rate
+    assert r["paid_cents"] == 0
+    assert r["outstanding_cents"] == rate
+    assert r["clean"] is False  # uninvoiced usage exists
+
+    billing.generate_invoice(db, firm=firm, period_start=WIDE_START,
+                             period_end=WIDE_END, issued_by="ops")
+    billing.record_external_payment(db, invoice=inv, reference="WIRE-9", actor="ops")
+    r = billing.reconciliation_report(db, firm)
+    assert r["metered_uninvoiced_cents"] == 0
+    assert r["paid_cents"] == rate
+    assert r["clean"] is True
+    assert len(r["per_project"]) == 1
+    assert r["per_project"][0]["records"] == 2
