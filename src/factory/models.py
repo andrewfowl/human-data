@@ -307,6 +307,7 @@ class Invoice(Base):
     line_items: Mapped[list] = mapped_column(JSON, default=list)
     stripe_invoice_id: Mapped[str | None] = mapped_column(String, nullable=True)
     hosted_invoice_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    checkout_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     external_paid_reference: Mapped[str | None] = mapped_column(String, nullable=True)
     issued_by: Mapped[str] = mapped_column(String, nullable=False)
     issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

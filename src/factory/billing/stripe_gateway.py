@@ -20,6 +20,8 @@ from ..models import Firm, Invoice
 class StripeGateway(Protocol):
     def ensure_customer(self, firm: Firm) -> str: ...
     def push_invoice(self, firm: Firm, invoice: Invoice) -> tuple[str, str]: ...
+    def create_checkout_session(self, firm: Firm, invoice: Invoice,
+                                success_url: str, cancel_url: str) -> tuple[str, str]: ...
     def parse_webhook(self, payload: bytes, signature: str | None) -> dict: ...
 
 
@@ -59,6 +61,28 @@ class LiveStripeGateway:
         self._stripe.Invoice.send_invoice(st_invoice.id)
         return st_invoice.id, st_invoice.hosted_invoice_url or ""
 
+    def create_checkout_session(self, firm: Firm, invoice: Invoice,
+                                success_url: str, cancel_url: str) -> tuple[str, str]:
+        session = self._stripe.checkout.Session.create(
+            mode="payment",
+            customer=firm.stripe_customer_id or None,
+            line_items=[{
+                "quantity": 1,
+                "price_data": {
+                    "currency": invoice.currency,
+                    "unit_amount": invoice.subtotal_cents,
+                    "product_data": {
+                        "name": f"Invoice {invoice.number}",
+                        "description": f"Human Data Factory — {firm.name}",
+                    },
+                },
+            }],
+            metadata={"hdf_invoice_id": invoice.id, "hdf_invoice_number": invoice.number},
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+        return session.id, session.url or ""
+
     def parse_webhook(self, payload: bytes, signature: str | None) -> dict:
         if not settings.stripe_webhook_secret:
             raise PermissionError("STRIPE_WEBHOOK_SECRET is not configured")
@@ -77,6 +101,11 @@ class FakeStripeGateway:
     def push_invoice(self, firm: Firm, invoice: Invoice) -> tuple[str, str]:
         fake_id = f"in_fake_{uuid.uuid4().hex[:16]}"
         return fake_id, f"https://invoice.example/{fake_id}"
+
+    def create_checkout_session(self, firm: Firm, invoice: Invoice,
+                                success_url: str, cancel_url: str) -> tuple[str, str]:
+        fake_id = f"cs_fake_{uuid.uuid4().hex[:16]}"
+        return fake_id, f"https://checkout.example/{fake_id}"
 
     def parse_webhook(self, payload: bytes, signature: str | None) -> dict:
         if not settings.auth_disabled:

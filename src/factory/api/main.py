@@ -30,6 +30,7 @@ from ..models import (
     SubmissionStatus, Task, TaskStatus, TaskType, UsageEvent, User,
 )
 from ..qc import engine
+from ..ratelimit import RateLimitMiddleware
 from ..rubrics import RUBRICS, default_rubric_for
 
 
@@ -44,9 +45,10 @@ app = FastAPI(
     description="Boutique expert-data pipeline with embedded internal controls, "
                 "autonomous quality-control reviews, and firm-level billing "
                 "(external or embedded Stripe).",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=_lifespan,
 )
+app.add_middleware(RateLimitMiddleware)
 
 
 def get_db() -> Iterator[Session]:
@@ -517,6 +519,30 @@ def get_invoice(invoice_id: str, actor: auth.Actor = Depends(any_authenticated),
     inv = _get_or_404(db, Invoice, invoice_id)
     auth.assert_firm_access(actor, inv.firm_id)
     return _invoice_out(inv)
+
+
+class CheckoutIn(BaseModel):
+    success_url: str
+    cancel_url: str
+
+
+@app.post("/invoices/{invoice_id}/checkout", status_code=201)
+def create_invoice_checkout(invoice_id: str, body: CheckoutIn,
+                            actor: auth.Actor = Depends(any_authenticated),
+                            db: Session = Depends(get_db)):
+    """Self-serve payment: returns a Stripe Checkout URL for an unpaid invoice."""
+    inv = _get_or_404(db, Invoice, invoice_id)
+    auth.assert_firm_access(actor, inv.firm_id)
+    firm = _get_or_404(db, Firm, inv.firm_id)
+    try:
+        inv, checkout_url = billing.create_checkout(db, invoice=inv, firm=firm,
+                                                    success_url=body.success_url,
+                                                    cancel_url=body.cancel_url,
+                                                    actor=actor.id)
+    except billing.BillingError as e:
+        raise HTTPException(409, str(e))
+    return {"invoice_id": inv.id, "checkout_session_id": inv.checkout_session_id,
+            "checkout_url": checkout_url}
 
 
 @app.post("/invoices/{invoice_id}/external-payment")

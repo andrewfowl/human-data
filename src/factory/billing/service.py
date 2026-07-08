@@ -168,10 +168,61 @@ def record_external_payment(db: Session, *, invoice: Invoice, reference: str,
     return invoice
 
 
+PAYABLE_STATUSES = (InvoiceStatus.ISSUED_EXTERNAL.value, InvoiceStatus.OPEN.value)
+
+
+def create_checkout(db: Session, *, invoice: Invoice, firm: Firm,
+                    success_url: str, cancel_url: str, actor: str) -> tuple[Invoice, str]:
+    """Create a self-serve Stripe Checkout session for an unpaid invoice.
+
+    Works for both billing modes: stripe-mode invoices get a card alternative
+    to the hosted Stripe invoice, and external-mode firms can settle by card
+    instead of their AP process. Payment lands via the
+    `checkout.session.completed` webhook.
+    """
+    if invoice.status not in PAYABLE_STATUSES:
+        raise BillingError(f"invoice is in status '{invoice.status}', not payable")
+    for url in (success_url, cancel_url):
+        if not url.startswith(("https://", "http://")):
+            raise BillingError("success_url and cancel_url must be absolute URLs")
+    gateway = get_gateway()
+    session_id, url = gateway.create_checkout_session(firm, invoice, success_url, cancel_url)
+    invoice.checkout_session_id = session_id
+    audit.record(db, actor=actor, action="invoice.checkout_created",
+                 entity_type="invoice", entity_id=invoice.id,
+                 payload={"checkout_session_id": session_id})
+    db.commit()
+    return invoice, url
+
+
 def handle_stripe_event(db: Session, event: dict) -> dict:
     """Apply a Stripe webhook event to the matching invoice."""
     etype = event.get("type", "")
     obj = (event.get("data") or {}).get("object") or {}
+
+    # Self-serve checkout completion — matched by our metadata, then by session id.
+    if etype == "checkout.session.completed":
+        invoice_id = (obj.get("metadata") or {}).get("hdf_invoice_id")
+        invoice = db.get(Invoice, invoice_id) if invoice_id else None
+        if invoice is None and obj.get("id"):
+            invoice = db.execute(
+                select(Invoice).where(Invoice.checkout_session_id == obj["id"])
+            ).scalar_one_or_none()
+        if invoice is None:
+            return {"handled": False, "reason": "unknown checkout session"}
+        if invoice.status == InvoiceStatus.PAID.value:
+            return {"handled": True, "invoice_id": invoice.id, "status": invoice.status}
+        invoice.status = InvoiceStatus.PAID.value
+        invoice.paid_at = datetime.now(timezone.utc)
+        reference = obj.get("payment_intent") or obj.get("id") or ""
+        if invoice.mode == BillingMode.EXTERNAL.value:
+            invoice.external_paid_reference = f"stripe-checkout:{reference}"
+        audit.record(db, actor="stripe-webhook", action="invoice.paid",
+                     entity_type="invoice", entity_id=invoice.id,
+                     payload={"stripe_event": etype, "reference": reference})
+        db.commit()
+        return {"handled": True, "invoice_id": invoice.id, "status": invoice.status}
+
     stripe_invoice_id = obj.get("id")
     if not stripe_invoice_id or not etype.startswith("invoice."):
         return {"handled": False, "reason": "not an invoice event"}

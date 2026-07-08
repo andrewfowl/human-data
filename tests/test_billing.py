@@ -158,3 +158,44 @@ def test_reconciliation_report(db, firm, project, task, qualified_expert, review
     assert r["clean"] is True
     assert len(r["per_project"]) == 1
     assert r["per_project"][0]["records"] == 2
+
+
+def test_checkout_selfserve_payment_flow(db, firm, task, qualified_expert, reviewer):
+    _approve(db, task, qualified_expert, reviewer)
+    inv = billing.generate_invoice(db, firm=firm, period_start=WIDE_START,
+                                   period_end=WIDE_END, issued_by="ops")
+    assert inv.status == InvoiceStatus.ISSUED_EXTERNAL.value
+
+    inv, url = billing.create_checkout(db, invoice=inv, firm=firm,
+                                       success_url="https://app.example/paid",
+                                       cancel_url="https://app.example/cancel",
+                                       actor="client-user")
+    assert inv.checkout_session_id.startswith("cs_fake_")
+    assert url.startswith("https://checkout.example/")
+
+    event = {"type": "checkout.session.completed",
+             "data": {"object": {"id": inv.checkout_session_id,
+                                 "payment_intent": "pi_fake_123",
+                                 "metadata": {"hdf_invoice_id": inv.id}}}}
+    result = billing.handle_stripe_event(db, event)
+    assert result["handled"] is True
+    db.refresh(inv)
+    assert inv.status == InvoiceStatus.PAID.value
+    assert inv.external_paid_reference == "stripe-checkout:pi_fake_123"
+
+    # replayed webhook is idempotent
+    assert billing.handle_stripe_event(db, event)["handled"] is True
+    # a paid invoice cannot open a new checkout
+    with pytest.raises(billing.BillingError):
+        billing.create_checkout(db, invoice=inv, firm=firm,
+                                success_url="https://x.example/s",
+                                cancel_url="https://x.example/c", actor="client-user")
+
+
+def test_checkout_rejects_relative_urls(db, firm, task, qualified_expert, reviewer):
+    _approve(db, task, qualified_expert, reviewer)
+    inv = billing.generate_invoice(db, firm=firm, period_start=WIDE_START,
+                                   period_end=WIDE_END, issued_by="ops")
+    with pytest.raises(billing.BillingError):
+        billing.create_checkout(db, invoice=inv, firm=firm,
+                                success_url="/paid", cancel_url="/cancel", actor="x")

@@ -194,6 +194,18 @@ first deploy:
 future schema changes are added as revisions. `init_db`/`create_all` remains
 for local dev and the ephemeral demo mode.
 
+**Self-serve payment (Stripe Checkout)** — `POST /invoices/{id}/checkout`
+(callable by the firm's own client users) returns a Stripe Checkout URL for
+any unpaid invoice — including *external*-mode invoices, giving firms a
+pay-by-card alternative to their AP process. Completion arrives via the
+`checkout.session.completed` webhook, which marks the invoice paid
+idempotently and records the payment-intent reference.
+
+**Rate limiting** — fixed-window per credential (or per IP when anonymous),
+`HDF_RATE_LIMIT_PER_MINUTE` (default 120, `0` disables); 429 with
+`Retry-After` on breach, `/healthz` exempt. State is per instance — front it
+with an edge/WAF limiter for hard global guarantees.
+
 **Reconciliation** — `GET /firms/{id}/reconciliation` (firm-scoped) and
 `GET /billing/reconciliation` (ops-wide) tie out metered usage vs invoiced vs
 paid per project and per firm, flagging any leakage between production,

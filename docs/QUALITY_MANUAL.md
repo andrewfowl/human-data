@@ -140,6 +140,12 @@ bypassing it.
 - **B4 — Client transparency.** Firm users can read their own usage ledger,
   billing summary, and invoices at any time — and nothing belonging to any
   other firm.
+- **B5 — Self-serve settlement integrity.** Checkout sessions can only be
+  opened for unpaid invoices by principals with access to that firm; payment
+  state changes only on webhook evidence (signature-verified in production),
+  idempotent under replay, with the payment-intent reference recorded.
+- **B6 — Reconciliation.** Metered vs invoiced vs paid tie-outs per project,
+  per firm, and factory-wide; any leakage surfaces as `clean: false`.
 
 ## 7. Known limitations / roadmap
 

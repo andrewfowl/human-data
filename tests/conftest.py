@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # and header-based dev auth (auth-enabled behavior is tested explicitly).
 os.environ["HDF_QC_OFFLINE"] = "1"
 os.environ["HDF_AUTH_DISABLED"] = "1"
+os.environ["HDF_RATE_LIMIT_PER_MINUTE"] = "0"  # rate limiting tested explicitly
 
 from factory import db as database  # noqa: E402
 from factory.models import (  # noqa: E402

@@ -66,6 +66,10 @@ class Settings:
         "preference": int(os.environ.get("HDF_RATE_PREFERENCE_CENTS", "15000")),
         "eval": int(os.environ.get("HDF_RATE_EVAL_CENTS", "18000")),
     })
+    # Requests per minute per credential/IP; 0 disables (see factory/ratelimit.py).
+    rate_limit_per_minute: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_RATE_LIMIT_PER_MINUTE", "120"))
+    )
     stripe_secret_key: str = field(default_factory=lambda: os.environ.get("STRIPE_SECRET_KEY", ""))
     stripe_webhook_secret: str = field(
         default_factory=lambda: os.environ.get("STRIPE_WEBHOOK_SECRET", "")
