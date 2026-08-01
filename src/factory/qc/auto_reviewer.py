@@ -25,8 +25,18 @@ from ..validators import ValidationResult
 AUTO_REVIEWER_ID = "auto-qc/claude"
 FALLBACK_REVIEWER_ID = "auto-qc/heuristic-v1"
 
+# Bump whenever the system prompt or output schema changes — score shifts must
+# be attributable to grader changes vs contributor changes.
+PROMPT_VERSION = "qc-prompt-v2"
+
 # Flags the reviewer may raise; CRITICAL_FLAGS force revision regardless of score.
 CRITICAL_FLAGS = {"CALCULATION_ERROR", "FABRICATED_CITATION", "HALLUCINATION_RISK", "PII"}
+
+
+def grader_version(rubric: Rubric, live: bool) -> str:
+    """Fully-pinned grader identity: prompt + rubric + resolved model."""
+    model = settings.qc_model if live else "heuristic-v1"
+    return f"{PROMPT_VERSION}/{rubric.id}/{model}"
 
 
 @dataclass
@@ -37,12 +47,16 @@ class AutoReview:
     criterion_scores: list[dict] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
     summary: str = ""
+    insufficient_evidence: bool = False
+    grader_version: str = ""
 
     def as_detail(self) -> dict:
         return {
             "criterion_scores": self.criterion_scores,
             "flags": self.flags,
             "summary": self.summary,
+            "insufficient_evidence": self.insufficient_evidence,
+            "grader_version": self.grader_version,
             "model": settings.qc_model if self.reviewer_id == AUTO_REVIEWER_ID else None,
         }
 
@@ -60,8 +74,9 @@ def _review_schema(rubric: Rubric) -> dict:
                         "criterion": {"type": "string", "enum": keys},
                         "score": {"type": "integer", "enum": [0, 1, 2, 3, 4, 5]},
                         "justification": {"type": "string"},
+                        "evidence": {"type": "string"},
                     },
-                    "required": ["criterion", "score", "justification"],
+                    "required": ["criterion", "score", "justification", "evidence"],
                     "additionalProperties": False,
                 },
             },
@@ -72,9 +87,10 @@ def _review_schema(rubric: Rubric) -> dict:
                     "enum": sorted(CRITICAL_FLAGS | {"STYLE_ISSUE", "INCOMPLETE", "WEAK_CONTRAST"}),
                 },
             },
+            "insufficient_evidence": {"type": "boolean"},
             "summary": {"type": "string"},
         },
-        "required": ["criterion_scores", "flags", "summary"],
+        "required": ["criterion_scores", "flags", "insufficient_evidence", "summary"],
         "additionalProperties": False,
     }
 
@@ -89,10 +105,15 @@ what the submission claims it says. A submission that is fluent but contains a s
 wrong number, an unbalanced entry, or a misattributed standard must score low on \
 technical_accuracy or standards_grounding.
 
-Score each rubric criterion from 0 (unusable) to 5 (exemplary training data). Raise flags \
-only when warranted: CALCULATION_ERROR, FABRICATED_CITATION, HALLUCINATION_RISK, PII, \
-STYLE_ISSUE, INCOMPLETE, WEAK_CONTRAST (preference pairs only). Be strict — this data \
-trains models; errors here propagate."""
+Score each rubric criterion from 0 (unusable) to 5 (exemplary training data). For every \
+criterion, `evidence` must be a short VERBATIM quote from the submission that grounds your \
+score — the specific figure, entry, citation, or sentence you evaluated. Never paraphrase \
+in the evidence field. If the submission does not contain enough concrete material to \
+ground a criterion (nothing to quote, or your score would rest on inference rather than \
+quoted text), set `insufficient_evidence` to true so the item routes to a human reviewer. \
+Raise flags only when warranted: CALCULATION_ERROR, FABRICATED_CITATION, \
+HALLUCINATION_RISK, PII, STYLE_ISSUE, INCOMPLETE, WEAK_CONTRAST (preference pairs only). \
+Be strict — this data trains models; errors here propagate."""
 
 
 def _build_user_prompt(task_prompt: str, task_context: dict, task_type: str,
@@ -176,14 +197,18 @@ def _review_with_claude(task_prompt: str, task_context: dict, task_type: str,
             reviewer_id=AUTO_REVIEWER_ID, overall_score=0.0, passed=False,
             flags=["HALLUCINATION_RISK"],
             summary="Model declined to review this submission; routed to human review.",
+            insufficient_evidence=True,
+            grader_version=grader_version(rubric, live=True),
         )
     text = next(b.text for b in response.content if b.type == "text")
     data = json.loads(text)
     overall = _weighted_overall(rubric, data["criterion_scores"])
     critical_flags = sorted(set(data["flags"]) & CRITICAL_FLAGS)
+    insufficient = bool(data.get("insufficient_evidence"))
     passed = (
         overall >= settings.qc_pass_threshold
         and not critical_flags
+        and not insufficient  # ungrounded scores never auto-approve
         and not _critical_gate_failed(rubric, data["criterion_scores"])
     )
     return AutoReview(
@@ -193,6 +218,8 @@ def _review_with_claude(task_prompt: str, task_context: dict, task_type: str,
         criterion_scores=data["criterion_scores"],
         flags=data["flags"],
         summary=data["summary"],
+        insufficient_evidence=insufficient,
+        grader_version=grader_version(rubric, live=True),
     )
 
 
@@ -214,7 +241,7 @@ def _review_heuristic(task_type: str, content: dict, rubric: Rubric,
 
     criterion_scores = [
         {"criterion": c.key, "score": int(round(score)),
-         "justification": "heuristic offline estimate"}
+         "justification": "heuristic offline estimate", "evidence": ""}
         for c in rubric.criteria
     ]
     return AutoReview(
@@ -224,4 +251,6 @@ def _review_heuristic(task_type: str, content: dict, rubric: Rubric,
         criterion_scores=criterion_scores,
         flags=["OFFLINE_FALLBACK"],
         summary="Offline heuristic review; submission requires human review before approval.",
+        insufficient_evidence=True,  # a heuristic cannot quote grounding evidence
+        grader_version=grader_version(rubric, live=False),
     )

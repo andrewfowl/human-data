@@ -55,11 +55,23 @@ flags, summary — is machine-parseable by construction. Critical flags
 sub-3 score on a critical rubric criterion force revision regardless of the
 overall score.
 
+Reviews are **evidence-bound**: the model must quote the verbatim span that
+grounds each criterion score, and a review it cannot ground
+(`insufficient_evidence`) never auto-approves. Every auto review is stamped
+with a `grader_version` (prompt / rubric / resolved model) so score drift is
+attributable.
+
 Without an Anthropic credential (or with `HDF_QC_OFFLINE=1`) a deterministic
 heuristic reviewer runs instead. Fallback reviews are flagged
 `OFFLINE_FALLBACK` and **can never auto-approve** — they always route to a
 human reviewer, so degraded automation degrades to more human oversight, not
 less.
+
+**Calibration** — `GET /qc/calibration` measures the autonomous reviewer
+against human verdicts on the sampled overlap: agreement, false-pass /
+false-hold rates, exact/adjacent score agreement, sliced by track and grader
+version, with a sampling recommendation (`raise_sampling` when the
+false-pass rate exceeds tolerance) that feeds the adaptive-sampling control.
 
 ## Multi-tenancy, auth, and billing (v0.2)
 

@@ -1,3 +1,3 @@
 """Human Data Factory — finance & accounting training datasets with embedded internal controls."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

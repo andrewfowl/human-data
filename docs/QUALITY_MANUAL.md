@@ -82,6 +82,23 @@ event's hash covers the previous hash and the event body. `verify_chain` walks
 the full chain; any modification of a historical record breaks verification.
 *Evidence:* `GET /audit/verify`; chain head embedded in every export manifest.
 
+### C8 — Grader calibration & versioning
+*Objective:* the autonomous reviewer is continuously measured against human
+judgment, and every score is attributable to a pinned grader.
+*Operation:* every sampled submission carries both an auto-LLM and a human
+verdict; `GET /qc/calibration` computes verdict agreement, false-pass rate
+(auto passed, human did not — the direction that would ship a bad record
+without sampling), false-hold rate, and exact/adjacent score agreement,
+sliced by domain track and grader version. A false-pass rate above 5%
+produces a `raise_sampling` recommendation feeding C3; strong agreement
+(≥90% on ≥50 pairs) flags the sampling floors for review. Each auto review
+is stamped with a `grader_version` (prompt version / rubric id / resolved
+model), so score drift can be attributed to grader changes vs contributor
+changes. Auto reviews must quote verbatim evidence per criterion; a review
+the model cannot ground (`insufficient_evidence`) never auto-approves.
+*Evidence:* review `detail` records (evidence quotes, grader version);
+calibration endpoint output; audit trail.
+
 ## 3. The QC pipeline (gates)
 
 1. **Deterministic validators** — schema completeness and minimum length; PII
