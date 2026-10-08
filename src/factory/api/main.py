@@ -29,7 +29,7 @@ from ..models import (
     Invoice, Project, Qualification, RateCard, Review, Role, Submission,
     SubmissionStatus, Task, TaskStatus, TaskType, UsageEvent, User,
 )
-from ..qc import engine
+from ..qc import calibration, engine
 from ..ratelimit import RateLimitMiddleware
 from ..rubrics import RUBRICS, default_rubric_for
 
@@ -45,7 +45,7 @@ app = FastAPI(
     description="Boutique expert-data pipeline with embedded internal controls, "
                 "autonomous quality-control reviews, and firm-level billing "
                 "(external or embedded Stripe).",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=_lifespan,
 )
 app.add_middleware(RateLimitMiddleware)
@@ -651,6 +651,13 @@ def approve_export(batch_id: str, body: ExportApproveIn,
         raise HTTPException(409, str(e))
     return {"batch_id": batch.id, "status": batch.status, "path": batch.path,
             "manifest": batch.manifest}
+
+
+@app.get("/qc/calibration")
+def qc_calibration(track: DomainTrack | None = None,
+                   actor: auth.Actor = Depends(internal), db: Session = Depends(get_db)):
+    """Auto-reviewer vs human-reviewer agreement, sliced by track and grader version."""
+    return calibration.calibration_report(db, track.value if track else None)
 
 
 @app.get("/audit/verify")
