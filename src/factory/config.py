@@ -18,9 +18,12 @@ def _default_database_url() -> str:
         or os.environ.get("POSTGRES_URL")
     )
     if url:
-        # SQLAlchemy needs the postgresql:// scheme (Heroku/Vercel emit postgres://).
-        if url.startswith("postgres://"):
-            url = "postgresql://" + url[len("postgres://"):]
+        # Heroku/Vercel emit postgres://, which SQLAlchemy does not accept.
+        # SQLAlchemy 2.1 defaults bare postgresql:// to psycopg 3; we ship psycopg2.
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                url = "postgresql+psycopg2://" + url[len(prefix):]
+                break
         return url
     return "sqlite:////tmp/hdf.db" if _ON_VERCEL else "sqlite:///hdf.db"
 
