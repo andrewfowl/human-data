@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Iterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -690,6 +692,67 @@ def metrics(actor: auth.Actor = Depends(internal), db: Session = Depends(get_db)
     }
 
 
+# ------------------------------------------------------------------ dashboard support
+
+@app.get("/bootstrap/status")
+def bootstrap_status(db: Session = Depends(get_db)):
+    count = db.execute(select(func.count()).select_from(User)).scalar()
+    return {"bootstrapped": bool(count)}
+
+
+@app.get("/me")
+def whoami(actor: auth.Actor = Depends(any_authenticated)):
+    return {"id": actor.id, "name": actor.name, "role": actor.role,
+            "firm_id": actor.firm_id, "expert_id": actor.expert_id}
+
+
+@app.get("/users")
+def list_users(actor: auth.Actor = Depends(admin_only), db: Session = Depends(get_db)):
+    return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role,
+             "firm_id": u.firm_id, "expert_id": u.expert_id, "active": u.active}
+            for u in db.execute(select(User).order_by(User.created_at)).scalars()]
+
+
+@app.get("/experts")
+def list_experts(actor: auth.Actor = Depends(internal), db: Session = Depends(get_db)):
+    return [_expert_out(e)
+            for e in db.execute(select(Expert).order_by(Expert.created_at)).scalars()]
+
+
+@app.get("/projects/{project_id}/tasks")
+def list_project_tasks(project_id: str, actor: auth.Actor = Depends(any_authenticated),
+                       db: Session = Depends(get_db)):
+    if actor.role not in (ADMIN, OPS, CLIENT):
+        raise HTTPException(403, f"role '{actor.role}' is not permitted for this action")
+    p = _get_or_404(db, Project, project_id)
+    auth.assert_firm_access(actor, p.firm_id)
+    rows = db.execute(select(Task).where(Task.project_id == p.id)
+                      .order_by(Task.created_at)).scalars()
+    out = []
+    for t in rows:
+        item = {"id": t.id, "prompt": t.prompt, "status": t.status,
+                "assigned_to": t.assigned_to, "created_at": t.created_at}
+        if actor.is_internal:
+            item["is_gold"] = t.is_gold
+        out.append(item)
+    return out
+
+
+@app.get("/my/tasks")
+def my_tasks(actor: auth.Actor = Depends(submit_roles), db: Session = Depends(get_db)):
+    if not actor.expert_id:
+        return []
+    rows = db.execute(
+        select(Task, Project).join(Project, Task.project_id == Project.id)
+        .where(Task.assigned_to == actor.expert_id).order_by(Task.created_at)
+    ).all()
+    # is_gold is withheld so honeypot tasks stay indistinguishable to the expert.
+    return [{"id": t.id, "project_id": p.id, "project_name": p.name,
+             "task_type": p.task_type, "track": p.track, "prompt": t.prompt,
+             "context": t.context, "status": t.status, "guidelines": p.guidelines}
+            for t, p in rows]
+
+
 # ------------------------------------------------------------------ landing page
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -720,7 +783,7 @@ def landing():
   <li>Firm-level billing: metered usage with external invoicing, or embedded Stripe</li>
   <li>Hash-chained audit trail behind every record shipped</li>
 </ul>
-<p><a href="/docs">API documentation</a> &middot; <a href="/healthz">health</a></p>
+<p><a href="/app/"><strong>Open the dashboard</strong></a> &middot; <a href="/docs">API documentation</a> &middot; <a href="/healthz">health</a></p>
 <p>New deployment? <code>POST /bootstrap</code> creates the first admin user and API key.</p>
 </body></html>"""
 
@@ -729,3 +792,7 @@ def landing():
 def healthz(db: Session = Depends(get_db)):
     db.execute(select(func.count()).select_from(User))
     return {"ok": True, "version": app.version}
+
+
+app.mount("/app", StaticFiles(directory=Path(__file__).resolve().parent.parent / "dashboard",
+                              html=True), name="dashboard")
