@@ -251,7 +251,7 @@ class AuditEvent(Base):
     entity_type: Mapped[str] = mapped_column(String, nullable=False)
     entity_id: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    prev_hash: Mapped[str] = mapped_column(String, nullable=False)
+    prev_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
