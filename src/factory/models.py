@@ -17,7 +17,9 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -128,6 +130,44 @@ class User(Base):
     firm_id: Mapped[str | None] = mapped_column(ForeignKey("firms.id"), nullable=True)
     expert_id: Mapped[str | None] = mapped_column(ForeignKey("experts.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class FirmRole(str, enum.Enum):
+    """A client user's role inside one firm (tenant). Ordered by privilege."""
+
+    OWNER = "owner"    # everything admin can do, plus manage admins/owners
+    ADMIN = "admin"    # all firm projects, billing, manage members and project access
+    MEMBER = "member"  # only projects they have been granted
+
+
+FIRM_ROLE_RANK = {FirmRole.MEMBER.value: 0, FirmRole.ADMIN.value: 1, FirmRole.OWNER.value: 2}
+
+
+class FirmMembership(Base):
+    """Grants a client user access to a firm. A user may belong to several firms."""
+
+    __tablename__ = "firm_memberships"
+    __table_args__ = (UniqueConstraint("firm_id", "user_id", name="uq_firm_membership"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    firm_role: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ProjectMembership(Base):
+    """Grants a firm member access to one project. `firm_id` is denormalized for RLS."""
+
+    __tablename__ = "project_memberships"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_membership"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False,
+                                            index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

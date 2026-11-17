@@ -6,6 +6,14 @@ users table is empty. `HDF_AUTH_DISABLED=1` switches to header-based dev mode.
 
 Roles: admin (everything), ops (production + billing ops), reviewer (review
 queue), expert (submissions), client (read-only, scoped to their own firm).
+
+Tenancy: each firm is a tenant. A client user belongs to one or more firms via
+FirmMembership (owner > admin > member) and picks the active firm with the
+`X-Firm-Id` header (default: their home firm). Owners/admins see every firm
+project and billing; members see only projects granted via ProjectMembership.
+On Postgres, client requests additionally run under row-level security
+(factory/tenancy.py), so cross-firm rows are invisible at the database level.
+Experts are a shared pool across firms.
 """
 
 from __future__ import annotations
@@ -29,9 +37,10 @@ from ..billing import service as billing
 from ..billing.stripe_gateway import get_gateway
 from ..config import settings
 from ..models import (
-    ApiKey, BillingMode, DomainTrack, Expert, ExpertStatus, ExportBatch, Firm,
-    Invoice, Job, JobStatus, Project, Qualification, RateCard, Review, Role, Submission,
-    SubmissionStatus, Task, TaskStatus, TaskType, UsageEvent, User,
+    FIRM_ROLE_RANK, ApiKey, BillingMode, DomainTrack, Expert, ExpertStatus, ExportBatch, Firm,
+    FirmMembership, FirmRole, Invoice, Job, JobStatus, Project, ProjectMembership,
+    Qualification, RateCard, Review, Role, Submission, SubmissionStatus, Task, TaskStatus,
+    TaskType, UsageEvent, User,
 )
 from ..qc import calibration, engine
 from ..idempotency import IdempotencyMiddleware, purge_expired as purge_idempotency_keys
@@ -101,6 +110,7 @@ class UserIn(BaseModel):
     role: Role
     firm_id: str | None = None
     expert_id: str | None = None
+    firm_role: FirmRole | None = None  # client only; default owner for a firm's first user
 
 
 @app.post("/bootstrap", status_code=201)
@@ -136,12 +146,23 @@ def create_user(body: UserIn, actor: auth.Actor = Depends(admin_only),
                 firm_id=body.firm_id, expert_id=body.expert_id)
     db.add(user)
     db.flush()
+    firm_role = None
+    if body.role == Role.CLIENT:
+        firm_role = (body.firm_role or (FirmRole.MEMBER if _firm_has_members(db, body.firm_id)
+                                        else FirmRole.OWNER)).value
+        db.add(FirmMembership(firm_id=body.firm_id, user_id=user.id, firm_role=firm_role))
     key = auth.issue_key(db, user)
     audit.record(db, actor=actor.id, action="user.created", entity_type="user",
-                 entity_id=user.id, payload={"email": body.email, "role": body.role.value})
+                 entity_id=user.id, payload={"email": body.email, "role": body.role.value,
+                                             "firm_role": firm_role})
     db.commit()
-    return {"user_id": user.id, "api_key": key,
+    return {"user_id": user.id, "api_key": key, "firm_role": firm_role,
             "note": "store this key now; it is not retrievable later"}
+
+
+def _firm_has_members(db: Session, firm_id: str) -> bool:
+    return db.execute(select(FirmMembership.id)
+                      .where(FirmMembership.firm_id == firm_id)).first() is not None
 
 
 @app.post("/users/{user_id}/revoke")
@@ -332,9 +353,10 @@ def create_project(body: ProjectIn, actor: auth.Actor = Depends(internal),
 @app.get("/projects")
 def list_projects(actor: auth.Actor = Depends(any_authenticated),
                   db: Session = Depends(get_db)):
-    q = select(Project)
-    if actor.role == CLIENT:
-        q = q.where(Project.firm_id == actor.firm_id)
+    q = select(Project).order_by(Project.created_at)
+    visible = auth.accessible_project_filter(actor)
+    if visible is not None:
+        q = q.where(visible)
     return [{"id": p.id, "name": p.name, "firm_id": p.firm_id, "track": p.track,
              "task_type": p.task_type} for p in db.execute(q).scalars()]
 
@@ -377,6 +399,10 @@ def assign_task(task_id: str, expert_id: str, actor: auth.Actor = Depends(intern
 def get_task(task_id: str, actor: auth.Actor = Depends(any_authenticated),
              db: Session = Depends(get_db)):
     t = _get_or_404(db, Task, task_id)
+    if actor.role == CLIENT:
+        auth.assert_project_access(db, actor, db.get(Project, t.project_id))
+    elif actor.role == EXPERT and t.assigned_to != actor.expert_id:
+        raise HTTPException(403, "experts may only view tasks assigned to them")
     # gold_answer is deliberately never returned — honeypots stay blind.
     return {"id": t.id, "project_id": t.project_id, "prompt": t.prompt,
             "context": t.context, "status": t.status, "assigned_to": t.assigned_to,
@@ -477,7 +503,7 @@ class ExternalPaymentIn(BaseModel):
 @app.get("/firms/{firm_id}/billing")
 def get_billing_summary(firm_id: str, actor: auth.Actor = Depends(any_authenticated),
                         db: Session = Depends(get_db)):
-    auth.assert_firm_access(actor, firm_id)
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
     return billing.firm_billing_summary(db, _get_or_404(db, Firm, firm_id))
 
 
@@ -485,7 +511,7 @@ def get_billing_summary(firm_id: str, actor: auth.Actor = Depends(any_authentica
 def list_usage(firm_id: str, uninvoiced_only: bool = False,
                actor: auth.Actor = Depends(any_authenticated),
                db: Session = Depends(get_db)):
-    auth.assert_firm_access(actor, firm_id)
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
     _get_or_404(db, Firm, firm_id)
     q = select(UsageEvent).where(UsageEvent.firm_id == firm_id)
     if uninvoiced_only:
@@ -513,7 +539,7 @@ def generate_invoice(firm_id: str, body: InvoiceGenerateIn,
 @app.get("/firms/{firm_id}/invoices")
 def list_invoices(firm_id: str, actor: auth.Actor = Depends(any_authenticated),
                   db: Session = Depends(get_db)):
-    auth.assert_firm_access(actor, firm_id)
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
     _get_or_404(db, Firm, firm_id)
     rows = db.execute(select(Invoice).where(Invoice.firm_id == firm_id)
                       .order_by(Invoice.created_at)).scalars()
@@ -524,7 +550,7 @@ def list_invoices(firm_id: str, actor: auth.Actor = Depends(any_authenticated),
 def get_invoice(invoice_id: str, actor: auth.Actor = Depends(any_authenticated),
                 db: Session = Depends(get_db)):
     inv = _get_or_404(db, Invoice, invoice_id)
-    auth.assert_firm_access(actor, inv.firm_id)
+    auth.assert_firm_access(actor, inv.firm_id, FirmRole.ADMIN)
     return _invoice_out(inv)
 
 
@@ -539,7 +565,7 @@ def create_invoice_checkout(invoice_id: str, body: CheckoutIn,
                             db: Session = Depends(get_db)):
     """Self-serve payment: returns a Stripe Checkout URL for an unpaid invoice."""
     inv = _get_or_404(db, Invoice, invoice_id)
-    auth.assert_firm_access(actor, inv.firm_id)
+    auth.assert_firm_access(actor, inv.firm_id, FirmRole.ADMIN)
     firm = _get_or_404(db, Firm, inv.firm_id)
     try:
         inv, checkout_url = billing.create_checkout(db, invoice=inv, firm=firm,
@@ -570,7 +596,7 @@ def firm_reconciliation(firm_id: str, period_start: datetime | None = None,
                         period_end: datetime | None = None,
                         actor: auth.Actor = Depends(any_authenticated),
                         db: Session = Depends(get_db)):
-    auth.assert_firm_access(actor, firm_id)
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
     firm = _get_or_404(db, Firm, firm_id)
     return billing.reconciliation_report(db, firm, period_start, period_end)
 
@@ -684,7 +710,7 @@ class ExportApproveIn(BaseModel):
 def get_control_report(project_id: str, actor: auth.Actor = Depends(any_authenticated),
                        db: Session = Depends(get_db)):
     p = _get_or_404(db, Project, project_id)
-    auth.assert_firm_access(actor, p.firm_id)
+    auth.assert_project_access(db, actor, p)
     return export.control_report(db, p)
 
 
@@ -762,7 +788,187 @@ def bootstrap_status(db: Session = Depends(get_db)):
 @app.get("/me")
 def whoami(actor: auth.Actor = Depends(any_authenticated)):
     return {"id": actor.id, "name": actor.name, "role": actor.role,
-            "firm_id": actor.firm_id, "expert_id": actor.expert_id}
+            "firm_id": actor.firm_id, "expert_id": actor.expert_id,
+            "firm_role": actor.firm_role, "firm_ids": list(actor.firm_ids)}
+
+
+# ------------------------------------------------------------------ firm & project members
+
+class MemberIn(BaseModel):
+    name: str
+    email: EmailStr
+    firm_role: FirmRole = FirmRole.MEMBER
+
+
+class MemberRoleIn(BaseModel):
+    firm_role: FirmRole
+
+
+class ProjectMemberIn(BaseModel):
+    user_id: str
+
+
+def _assert_can_grant(actor: auth.Actor, firm_role: str) -> None:
+    """Admins manage members; only owners (or staff) can grant/revoke admin or owner."""
+    if actor.is_internal:
+        return
+    if FIRM_ROLE_RANK[firm_role] >= FIRM_ROLE_RANK[FirmRole.ADMIN.value] \
+            and actor.firm_role != FirmRole.OWNER.value:
+        raise HTTPException(403, "only firm owners can manage admins and owners")
+
+
+def _membership_or_404(db: Session, firm_id: str, user_id: str) -> FirmMembership:
+    m = db.execute(select(FirmMembership).where(FirmMembership.firm_id == firm_id,
+                                                FirmMembership.user_id == user_id)
+                   ).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(404, "user is not a member of this firm")
+    return m
+
+
+def _assert_not_last_owner(db: Session, m: FirmMembership) -> None:
+    if m.firm_role != FirmRole.OWNER.value:
+        return
+    owners = db.execute(select(func.count()).select_from(FirmMembership).where(
+        FirmMembership.firm_id == m.firm_id,
+        FirmMembership.firm_role == FirmRole.OWNER.value)).scalar()
+    if owners <= 1:
+        raise HTTPException(409, "a firm must keep at least one owner")
+
+
+@app.get("/firms/{firm_id}/members")
+def list_members(firm_id: str, actor: auth.Actor = Depends(any_authenticated),
+                 db: Session = Depends(get_db)):
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
+    rows = db.execute(select(FirmMembership, User).join(User, FirmMembership.user_id == User.id)
+                      .where(FirmMembership.firm_id == firm_id)
+                      .order_by(FirmMembership.created_at)).all()
+    return [{"user_id": u.id, "name": u.name, "email": u.email, "firm_role": m.firm_role,
+             "active": u.active} for m, u in rows]
+
+
+@app.post("/firms/{firm_id}/members", status_code=201)
+def add_member(firm_id: str, body: MemberIn, actor: auth.Actor = Depends(any_authenticated),
+               db: Session = Depends(get_db)):
+    """Invite a colleague: creates a client user in this firm and returns their API key."""
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
+    _assert_can_grant(actor, body.firm_role.value)
+    _get_or_404(db, Firm, firm_id)
+    if db.execute(select(User.id).where(User.email == body.email)).first():
+        raise HTTPException(409, "email already registered")
+    user = User(name=body.name, email=body.email, role=CLIENT, firm_id=firm_id)
+    db.add(user)
+    db.flush()
+    db.add(FirmMembership(firm_id=firm_id, user_id=user.id, firm_role=body.firm_role.value))
+    key = auth.issue_key(db, user)
+    audit.record(db, actor=actor.id, action="firm.member_added", entity_type="firm",
+                 entity_id=firm_id, payload={"user_id": user.id,
+                                             "firm_role": body.firm_role.value})
+    db.commit()
+    return {"user_id": user.id, "firm_role": body.firm_role.value, "api_key": key,
+            "note": "store this key now; it is not retrievable later"}
+
+
+@app.patch("/firms/{firm_id}/members/{user_id}")
+def change_member_role(firm_id: str, user_id: str, body: MemberRoleIn,
+                       actor: auth.Actor = Depends(any_authenticated),
+                       db: Session = Depends(get_db)):
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
+    m = _membership_or_404(db, firm_id, user_id)
+    _assert_can_grant(actor, m.firm_role)
+    _assert_can_grant(actor, body.firm_role.value)
+    if body.firm_role.value != FirmRole.OWNER.value:
+        _assert_not_last_owner(db, m)
+    previous, m.firm_role = m.firm_role, body.firm_role.value
+    audit.record(db, actor=actor.id, action="firm.member_role_changed", entity_type="firm",
+                 entity_id=firm_id, payload={"user_id": user_id, "from": previous,
+                                             "to": m.firm_role})
+    db.commit()
+    return {"user_id": user_id, "firm_role": m.firm_role}
+
+
+@app.delete("/firms/{firm_id}/members/{user_id}")
+def remove_member(firm_id: str, user_id: str, actor: auth.Actor = Depends(any_authenticated),
+                  db: Session = Depends(get_db)):
+    """Removes firm + project access. A user left with no firms has their keys revoked."""
+    auth.assert_firm_access(actor, firm_id, FirmRole.ADMIN)
+    m = _membership_or_404(db, firm_id, user_id)
+    _assert_can_grant(actor, m.firm_role)
+    _assert_not_last_owner(db, m)
+    db.delete(m)
+    for pm in db.execute(select(ProjectMembership).where(
+            ProjectMembership.firm_id == firm_id,
+            ProjectMembership.user_id == user_id)).scalars():
+        db.delete(pm)
+    db.flush()
+    # The privileged connection role is required to see memberships in other firms.
+    remaining = _count_other_memberships_unscoped(user_id, firm_id)
+    if remaining == 0:
+        user = db.get(User, user_id)
+        user.active = False
+        for k in db.execute(select(ApiKey).where(ApiKey.user_id == user_id)).scalars():
+            k.active = False
+    audit.record(db, actor=actor.id, action="firm.member_removed", entity_type="firm",
+                 entity_id=firm_id, payload={"user_id": user_id,
+                                             "deactivated": remaining == 0})
+    db.commit()
+    return {"user_id": user_id, "removed": True, "deactivated": remaining == 0}
+
+
+def _count_other_memberships_unscoped(user_id: str, firm_id: str) -> int:
+    """Separate privileged session: RLS hides the user's other firms from the tenant session."""
+    with database.session() as s:
+        return s.execute(select(func.count()).select_from(FirmMembership)
+                         .where(FirmMembership.user_id == user_id,
+                                FirmMembership.firm_id != firm_id)).scalar()
+
+
+@app.get("/projects/{project_id}/members")
+def list_project_members(project_id: str, actor: auth.Actor = Depends(any_authenticated),
+                         db: Session = Depends(get_db)):
+    p = _get_or_404(db, Project, project_id)
+    auth.assert_firm_access(actor, p.firm_id, FirmRole.ADMIN)
+    rows = db.execute(select(ProjectMembership, User)
+                      .join(User, ProjectMembership.user_id == User.id)
+                      .where(ProjectMembership.project_id == p.id)).all()
+    return [{"user_id": u.id, "name": u.name, "email": u.email} for _, u in rows]
+
+
+@app.post("/projects/{project_id}/members", status_code=201)
+def grant_project_access(project_id: str, body: ProjectMemberIn,
+                         actor: auth.Actor = Depends(any_authenticated),
+                         db: Session = Depends(get_db)):
+    p = _get_or_404(db, Project, project_id)
+    auth.assert_firm_access(actor, p.firm_id, FirmRole.ADMIN)
+    _membership_or_404(db, p.firm_id, body.user_id)
+    exists = db.execute(select(ProjectMembership.id).where(
+        ProjectMembership.project_id == p.id,
+        ProjectMembership.user_id == body.user_id)).first()
+    if exists is None:
+        db.add(ProjectMembership(firm_id=p.firm_id, project_id=p.id, user_id=body.user_id))
+        audit.record(db, actor=actor.id, action="project.access_granted",
+                     entity_type="project", entity_id=p.id,
+                     payload={"user_id": body.user_id})
+        db.commit()
+    return {"project_id": p.id, "user_id": body.user_id}
+
+
+@app.delete("/projects/{project_id}/members/{user_id}")
+def revoke_project_access(project_id: str, user_id: str,
+                          actor: auth.Actor = Depends(any_authenticated),
+                          db: Session = Depends(get_db)):
+    p = _get_or_404(db, Project, project_id)
+    auth.assert_firm_access(actor, p.firm_id, FirmRole.ADMIN)
+    pm = db.execute(select(ProjectMembership).where(
+        ProjectMembership.project_id == p.id,
+        ProjectMembership.user_id == user_id)).scalar_one_or_none()
+    if pm is None:
+        raise HTTPException(404, "user has no access to this project")
+    db.delete(pm)
+    audit.record(db, actor=actor.id, action="project.access_revoked", entity_type="project",
+                 entity_id=p.id, payload={"user_id": user_id})
+    db.commit()
+    return {"project_id": p.id, "user_id": user_id, "revoked": True}
 
 
 @app.get("/users")
@@ -784,13 +990,15 @@ def list_project_tasks(project_id: str, actor: auth.Actor = Depends(any_authenti
     if actor.role not in (ADMIN, OPS, CLIENT):
         raise HTTPException(403, f"role '{actor.role}' is not permitted for this action")
     p = _get_or_404(db, Project, project_id)
-    auth.assert_firm_access(actor, p.firm_id)
-    rows = db.execute(select(Task).where(Task.project_id == p.id)
-                      .order_by(Task.created_at)).scalars()
+    auth.assert_project_access(db, actor, p)
+    rows = db.execute(select(Task, Expert).outerjoin(Expert, Task.assigned_to == Expert.id)
+                      .where(Task.project_id == p.id).order_by(Task.created_at)).all()
     out = []
-    for t in rows:
+    for t, ex in rows:
         item = {"id": t.id, "prompt": t.prompt, "status": t.status,
-                "assigned_to": t.assigned_to, "created_at": t.created_at}
+                "assigned_to": t.assigned_to, "created_at": t.created_at,
+                "assigned_expert": {"id": ex.id, "name": ex.name, "email": ex.email,
+                                    "credentials": ex.credentials} if ex else None}
         if actor.is_internal:
             item["is_gold"] = t.is_gold
         out.append(item)
