@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Iterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
@@ -1050,7 +1050,7 @@ def landing():
   <li>Firm-level billing: metered usage with external invoicing, or embedded Stripe</li>
   <li>Hash-chained audit trail behind every record shipped</li>
 </ul>
-<p><a href="/app/"><strong>Open the dashboard</strong></a> &middot; <a href="/docs">API documentation</a> &middot; <a href="/healthz">health</a></p>
+<p><a href="/app"><strong>Open the dashboard</strong></a> &middot; <a href="/docs">API documentation</a> &middot; <a href="/healthz">health</a></p>
 <p>New deployment? <code>POST /bootstrap</code> creates the first admin user and API key.</p>
 </body></html>"""
 
@@ -1061,5 +1061,16 @@ def healthz(db: Session = Depends(get_db)):
     return {"ok": True, "version": app.version}
 
 
-app.mount("/app", StaticFiles(directory=Path(__file__).resolve().parent.parent / "dashboard",
-                              html=True), name="dashboard")
+DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
+
+
+# Some proxies (including the v0 preview) strip trailing slashes while the
+# StaticFiles mount redirects /app -> /app/, which loops forever. Serving the
+# shell at both paths without a redirect keeps the dashboard reachable either way.
+@app.get("/app", include_in_schema=False)
+@app.get("/app/", include_in_schema=False)
+def dashboard_shell():
+    return FileResponse(DASHBOARD_DIR / "index.html", media_type="text/html")
+
+
+app.mount("/app", StaticFiles(directory=DASHBOARD_DIR), name="dashboard")
