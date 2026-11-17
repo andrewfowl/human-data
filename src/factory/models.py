@@ -364,6 +364,7 @@ class IdempotencyRecord(Base):
     """Stored response for an `Idempotency-Key` request, scoped to the caller's credential."""
 
     __tablename__ = "idempotency_records"
+    __table_args__ = (Index("ix_idempotency_records_created_at", "created_at"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)  # sha256(principal, key)
     method: Mapped[str] = mapped_column(String, nullable=False)

@@ -34,6 +34,7 @@ from ..models import (
     SubmissionStatus, Task, TaskStatus, TaskType, UsageEvent, User,
 )
 from ..qc import calibration, engine
+from ..idempotency import IdempotencyMiddleware, purge_expired as purge_idempotency_keys
 from ..ratelimit import RateLimitMiddleware
 from ..rubrics import RUBRICS, default_rubric_for
 
@@ -52,6 +53,8 @@ app = FastAPI(
     version="0.4.0",
     lifespan=_lifespan,
 )
+# Starlette wraps in reverse order: the rate limiter runs first, so replays count too.
+app.add_middleware(IdempotencyMiddleware)
 app.add_middleware(RateLimitMiddleware)
 
 
@@ -650,12 +653,13 @@ def run_jobs(max_jobs: int = 25, actor: auth.Actor = Depends(admin_only)):
 
 @app.get("/cron/jobs", include_in_schema=False)
 def cron_jobs(authorization: str | None = Header(None)):
-    """Vercel Cron sweep: retries due jobs and reclaims expired leases."""
+    """Vercel Cron sweep: retries due jobs, reclaims expired leases, purges old keys."""
     if not settings.cron_secret:
         raise HTTPException(503, "CRON_SECRET is not configured")
     if not hmac.compare_digest(authorization or "", f"Bearer {settings.cron_secret}"):
         raise HTTPException(401, "invalid cron credentials")
-    return jobs.work(database.session, max_jobs=100, time_budget_s=50)
+    result = jobs.work(database.session, max_jobs=100, time_budget_s=45)
+    return {**result, "idempotency_keys_purged": purge_idempotency_keys(database.session)}
 
 
 def _invoice_out(inv: Invoice) -> dict:

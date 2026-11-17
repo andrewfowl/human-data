@@ -102,6 +102,10 @@ class Settings:
     idempotency_ttl_hours: int = field(
         default_factory=lambda: int(os.environ.get("HDF_IDEMPOTENCY_TTL_HOURS", "24"))
     )
+    # An in-progress key older than this is presumed crashed and may be retried.
+    idempotency_lock_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_IDEMPOTENCY_LOCK_SECONDS", "60"))
+    )
 
 
 settings = Settings()
