@@ -17,7 +17,9 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -128,6 +130,44 @@ class User(Base):
     firm_id: Mapped[str | None] = mapped_column(ForeignKey("firms.id"), nullable=True)
     expert_id: Mapped[str | None] = mapped_column(ForeignKey("experts.id"), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class FirmRole(str, enum.Enum):
+    """A client user's role inside one firm (tenant). Ordered by privilege."""
+
+    OWNER = "owner"    # everything admin can do, plus manage admins/owners
+    ADMIN = "admin"    # all firm projects, billing, manage members and project access
+    MEMBER = "member"  # only projects they have been granted
+
+
+FIRM_ROLE_RANK = {FirmRole.MEMBER.value: 0, FirmRole.ADMIN.value: 1, FirmRole.OWNER.value: 2}
+
+
+class FirmMembership(Base):
+    """Grants a client user access to a firm. A user may belong to several firms."""
+
+    __tablename__ = "firm_memberships"
+    __table_args__ = (UniqueConstraint("firm_id", "user_id", name="uq_firm_membership"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    firm_role: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ProjectMembership(Base):
+    """Grants a firm member access to one project. `firm_id` is denormalized for RLS."""
+
+    __tablename__ = "project_memberships"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_membership"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    firm_id: Mapped[str] = mapped_column(ForeignKey("firms.id"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False,
+                                            index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -251,7 +291,7 @@ class AuditEvent(Base):
     entity_type: Mapped[str] = mapped_column(String, nullable=False)
     entity_id: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
-    prev_hash: Mapped[str] = mapped_column(String, nullable=False)
+    prev_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
@@ -325,4 +365,53 @@ class ExportBatch(Base):
     path: Mapped[str | None] = mapped_column(String, nullable=True)
     manifest: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String, default="pending_approval")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class JobStatus(str, enum.Enum):
+    QUEUED = "queued"        # waiting for run_at (initial or retry backoff)
+    RUNNING = "running"      # claimed under a lease
+    SUCCEEDED = "succeeded"
+    DEAD = "dead"            # exhausted attempts or permanent error; needs a human
+
+
+class Job(Base):
+    """Durable background job (transactional outbox — commits with the business change)."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_claim", "status", "run_at"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String, nullable=False, default=JobStatus.QUEUED.value)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    locked_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Exactly-once enqueue: e.g. "stripe:evt_123". Kept after success so replays dedupe.
+    dedupe_key: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now,
+                                                 onupdate=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IdempotencyRecord(Base):
+    """Stored response for an `Idempotency-Key` request, scoped to the caller's credential."""
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (Index("ix_idempotency_records_created_at", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # sha256(principal, key)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    path: Mapped[str] = mapped_column(String, nullable=False)
+    request_hash: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)  # in_progress | completed
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    response_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

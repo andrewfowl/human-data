@@ -18,9 +18,12 @@ def _default_database_url() -> str:
         or os.environ.get("POSTGRES_URL")
     )
     if url:
-        # SQLAlchemy needs the postgresql:// scheme (Heroku/Vercel emit postgres://).
-        if url.startswith("postgres://"):
-            url = "postgresql://" + url[len("postgres://"):]
+        # Heroku/Vercel emit postgres://, which SQLAlchemy does not accept.
+        # SQLAlchemy 2.1 defaults bare postgresql:// to psycopg 3; we ship psycopg2.
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                url = "postgresql+psycopg2://" + url[len(prefix):]
+                break
         return url
     return "sqlite:////tmp/hdf.db" if _ON_VERCEL else "sqlite:///hdf.db"
 
@@ -73,6 +76,35 @@ class Settings:
     stripe_secret_key: str = field(default_factory=lambda: os.environ.get("STRIPE_SECRET_KEY", ""))
     stripe_webhook_secret: str = field(
         default_factory=lambda: os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    )
+    # Background jobs (factory/jobs.py). "inline" runs a job in the request that
+    # enqueued it, right after commit — same latency as before, but a crash or
+    # error leaves a durable job that a worker/cron sweep retries. "deferred"
+    # only enqueues and returns; a worker must run.
+    queue_mode: str = field(
+        default_factory=lambda: os.environ.get("HDF_QUEUE_MODE", "inline").lower()
+    )
+    job_max_attempts: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_JOB_MAX_ATTEMPTS", "5"))
+    )
+    # A claimed job not finished within the lease is assumed crashed and reclaimed.
+    job_lease_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_JOB_LEASE_SECONDS", "300"))
+    )
+    job_backoff_base_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("HDF_JOB_BACKOFF_BASE_SECONDS", "10"))
+    )
+    job_backoff_cap_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("HDF_JOB_BACKOFF_CAP_SECONDS", "3600"))
+    )
+    # Vercel Cron sends `Authorization: Bearer $CRON_SECRET`; unset disables /cron/jobs.
+    cron_secret: str = field(default_factory=lambda: os.environ.get("CRON_SECRET", ""))
+    idempotency_ttl_hours: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_IDEMPOTENCY_TTL_HOURS", "24"))
+    )
+    # An in-progress key older than this is presumed crashed and may be retried.
+    idempotency_lock_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_IDEMPOTENCY_LOCK_SECONDS", "60"))
     )
 
 

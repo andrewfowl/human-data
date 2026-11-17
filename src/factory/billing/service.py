@@ -341,3 +341,19 @@ def firm_billing_summary(db: Session, firm: Firm) -> dict:
             if status in (InvoiceStatus.ISSUED_EXTERNAL.value, InvoiceStatus.OPEN.value)
         ),
     }
+
+
+STRIPE_EVENT_JOB = "stripe.event"
+
+
+def _register_stripe_job() -> None:
+    from .. import jobs  # local: jobs imports audit/models only, but keep billing import-light
+
+    @jobs.handler(STRIPE_EVENT_JOB)
+    def _stripe_event_job(db: Session, payload: dict) -> dict:
+        # handle_stripe_event is idempotent (paid invoices are left as-is),
+        # so at-least-once redelivery of the job is safe.
+        return handle_stripe_event(db, payload["event"])
+
+
+_register_stripe_job()

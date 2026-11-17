@@ -30,9 +30,12 @@ def get_engine():
 
 
 def init_db() -> None:
-    from . import models  # noqa: F401 — register mappings
+    from . import models, tenancy  # noqa: F401 — register mappings
 
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        tenancy.install_rls(conn)
 
 
 def session() -> Session:

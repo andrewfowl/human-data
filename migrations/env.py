@@ -19,7 +19,8 @@ from factory.db import Base  # noqa: E402
 from factory import models  # noqa: E402, F401 — register mappings
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# configparser treats '%' as interpolation; percent-encoded URLs must be escaped.
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

@@ -20,7 +20,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import audit, controls, validators
+from .. import audit, controls, jobs, validators
 from ..billing import service as billing
 from ..config import settings
 from ..models import (
@@ -67,8 +67,27 @@ def submit(db: Session, *, task: Task, expert: Expert, content: dict) -> Submiss
     audit.record(db, actor=expert.id, action="submission.created", entity_type="submission",
                  entity_id=sub.id, payload={"task_id": task.id, "version": version})
 
-    process(db, sub)
+    # Outbox: the QC job commits atomically with the submission, so a crash
+    # (or an LLM outage) mid-review leaves a retryable job, never a stuck row.
+    job, _ = jobs.enqueue(db, QC_JOB, {"submission_id": sub.id})
+    db.commit()
+    jobs.maybe_run_inline(db, job)
+    db.refresh(sub)
     return sub
+
+
+QC_JOB = "qc.process"
+
+
+@jobs.handler(QC_JOB)
+def _qc_job(db: Session, payload: dict) -> dict:
+    sub = db.get(Submission, payload["submission_id"])
+    if sub is None:
+        raise jobs.PermanentError(f"submission {payload['submission_id']} not found")
+    if sub.status != SubmissionStatus.SUBMITTED.value:
+        return {"skipped": True, "status": sub.status}  # already processed (redelivery)
+    process(db, sub)
+    return {"status": sub.status}
 
 
 def process(db: Session, sub: Submission) -> Submission:

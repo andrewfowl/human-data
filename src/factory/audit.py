@@ -11,12 +11,22 @@ from __future__ import annotations
 import hashlib
 import json
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .models import AuditEvent
 
 GENESIS = "0" * 64
+
+# Arbitrary fixed key for the transaction-scoped advisory lock that serializes
+# appends. Without it, two concurrent writers read the same head and fork the
+# chain; UNIQUE(prev_hash) is the backstop that turns any fork into an error.
+AUDIT_LOCK_KEY = 0x48444641554454  # "HDFAUDT"
+
+
+def _lock_chain(db: Session) -> None:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": AUDIT_LOCK_KEY})
 
 
 def _event_hash(prev_hash: str, actor: str, action: str, entity_type: str,
@@ -32,6 +42,7 @@ def _event_hash(prev_hash: str, actor: str, action: str, entity_type: str,
 def record(db: Session, *, actor: str, action: str, entity_type: str,
            entity_id: str, payload: dict | None = None) -> AuditEvent:
     payload = payload or {}
+    _lock_chain(db)
     last = db.execute(
         select(AuditEvent).order_by(AuditEvent.seq.desc()).limit(1)
     ).scalar_one_or_none()
