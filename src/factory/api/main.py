@@ -10,6 +10,8 @@ queue), expert (submissions), client (read-only, scoped to their own firm).
 
 from __future__ import annotations
 
+import hmac
+
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -22,13 +24,13 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import audit, auth, controls, db as database, export
+from .. import audit, auth, controls, db as database, export, jobs
 from ..billing import service as billing
 from ..billing.stripe_gateway import get_gateway
 from ..config import settings
 from ..models import (
     ApiKey, BillingMode, DomainTrack, Expert, ExpertStatus, ExportBatch, Firm,
-    Invoice, Project, Qualification, RateCard, Review, Role, Submission,
+    Invoice, Job, JobStatus, Project, Qualification, RateCard, Review, Role, Submission,
     SubmissionStatus, Task, TaskStatus, TaskType, UsageEvent, User,
 )
 from ..qc import calibration, engine
@@ -600,7 +602,60 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db),
         raise HTTPException(503, str(e))
     except Exception:
         raise HTTPException(400, "invalid webhook payload or signature")
-    return billing.handle_stripe_event(db, event)
+    # Inbox: persist the verified event, deduped on Stripe's event id, before
+    # acting on it. Stripe retries anything that isn't 2xx, so once the event
+    # is durably stored we acknowledge; failures are retried by our queue.
+    event_id = event.get("id")
+    job, created = jobs.enqueue(db, billing.STRIPE_EVENT_JOB, {"event": event},
+                                dedupe_key=f"stripe:{event_id}" if event_id else None)
+    db.commit()
+    if created:
+        job = jobs.maybe_run_inline(db, job)
+    if job.status == JobStatus.SUCCEEDED.value:
+        return {**(job.result or {}), "job_id": job.id, "duplicate": not created}
+    return {"accepted": True, "job_id": job.id, "status": job.status, "duplicate": not created}
+
+
+# ------------------------------------------------------------------ background jobs
+
+@app.get("/jobs")
+def list_jobs(status: str | None = None, kind: str | None = None, limit: int = 50,
+              actor: auth.Actor = Depends(internal), db: Session = Depends(get_db)):
+    q = select(Job).order_by(Job.created_at.desc()).limit(max(1, min(limit, 200)))
+    if status:
+        q = q.where(Job.status == status)
+    if kind:
+        q = q.where(Job.kind == kind)
+    return {"stats": jobs.queue_stats(db),
+            "jobs": [jobs.job_out(j) for j in db.execute(q).scalars()]}
+
+
+@app.post("/jobs/{job_id}/requeue")
+def requeue_job(job_id: str, actor: auth.Actor = Depends(admin_only),
+                db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    try:
+        job = jobs.requeue(db, job, actor=actor.id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return jobs.job_out(job)
+
+
+@app.post("/jobs/run")
+def run_jobs(max_jobs: int = 25, actor: auth.Actor = Depends(admin_only)):
+    return jobs.work(database.session, max_jobs=max(1, min(max_jobs, 200)), time_budget_s=25)
+
+
+@app.get("/cron/jobs", include_in_schema=False)
+def cron_jobs(authorization: str | None = Header(None)):
+    """Vercel Cron sweep: retries due jobs and reclaims expired leases."""
+    if not settings.cron_secret:
+        raise HTTPException(503, "CRON_SECRET is not configured")
+    if not hmac.compare_digest(authorization or "", f"Bearer {settings.cron_secret}"):
+        raise HTTPException(401, "invalid cron credentials")
+    return jobs.work(database.session, max_jobs=100, time_budget_s=50)
 
 
 def _invoice_out(inv: Invoice) -> dict:

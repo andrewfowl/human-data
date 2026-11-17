@@ -42,6 +42,24 @@ def serve(host: str = "0.0.0.0", port: int = 8000):
 
 
 @app.command()
+def worker(once: bool = typer.Option(False, help="Drain due jobs once and exit."),
+           poll_seconds: float = 2.0):
+    """Run background jobs (QC reviews, Stripe events) from the durable queue."""
+    import time
+
+    from . import jobs
+
+    while True:
+        stats = jobs.work(database.session, max_jobs=100, time_budget_s=60)
+        if stats["processed"]:
+            typer.echo(json.dumps(stats))
+        if once:
+            return
+        if not stats["processed"]:
+            time.sleep(poll_seconds)
+
+
+@app.command()
 def verify_audit():
     """Verify the hash-chained audit trail."""
     db = database.session()
