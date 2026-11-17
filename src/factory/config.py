@@ -77,6 +77,31 @@ class Settings:
     stripe_webhook_secret: str = field(
         default_factory=lambda: os.environ.get("STRIPE_WEBHOOK_SECRET", "")
     )
+    # Background jobs (factory/jobs.py). "inline" runs a job in the request that
+    # enqueued it, right after commit — same latency as before, but a crash or
+    # error leaves a durable job that a worker/cron sweep retries. "deferred"
+    # only enqueues and returns; a worker must run.
+    queue_mode: str = field(
+        default_factory=lambda: os.environ.get("HDF_QUEUE_MODE", "inline").lower()
+    )
+    job_max_attempts: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_JOB_MAX_ATTEMPTS", "5"))
+    )
+    # A claimed job not finished within the lease is assumed crashed and reclaimed.
+    job_lease_seconds: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_JOB_LEASE_SECONDS", "300"))
+    )
+    job_backoff_base_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("HDF_JOB_BACKOFF_BASE_SECONDS", "10"))
+    )
+    job_backoff_cap_seconds: float = field(
+        default_factory=lambda: float(os.environ.get("HDF_JOB_BACKOFF_CAP_SECONDS", "3600"))
+    )
+    # Vercel Cron sends `Authorization: Bearer $CRON_SECRET`; unset disables /cron/jobs.
+    cron_secret: str = field(default_factory=lambda: os.environ.get("CRON_SECRET", ""))
+    idempotency_ttl_hours: int = field(
+        default_factory=lambda: int(os.environ.get("HDF_IDEMPOTENCY_TTL_HOURS", "24"))
+    )
 
 
 settings = Settings()

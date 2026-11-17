@@ -17,7 +17,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -325,4 +325,52 @@ class ExportBatch(Base):
     path: Mapped[str | None] = mapped_column(String, nullable=True)
     manifest: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String, default="pending_approval")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class JobStatus(str, enum.Enum):
+    QUEUED = "queued"        # waiting for run_at (initial or retry backoff)
+    RUNNING = "running"      # claimed under a lease
+    SUCCEEDED = "succeeded"
+    DEAD = "dead"            # exhausted attempts or permanent error; needs a human
+
+
+class Job(Base):
+    """Durable background job (transactional outbox — commits with the business change)."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_claim", "status", "run_at"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_id)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String, nullable=False, default=JobStatus.QUEUED.value)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    locked_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Exactly-once enqueue: e.g. "stripe:evt_123". Kept after success so replays dedupe.
+    dedupe_key: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now,
+                                                 onupdate=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IdempotencyRecord(Base):
+    """Stored response for an `Idempotency-Key` request, scoped to the caller's credential."""
+
+    __tablename__ = "idempotency_records"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # sha256(principal, key)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    path: Mapped[str] = mapped_column(String, nullable=False)
+    request_hash: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)  # in_progress | completed
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    response_body: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
