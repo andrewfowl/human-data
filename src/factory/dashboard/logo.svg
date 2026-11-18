@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="184 187 886 886" role="img" aria-label="Human Data Factory">
+  <defs>
+    <linearGradient id="hdf-circle" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0077ff"/>
+      <stop offset=".5" stop-color="#00cfff"/>
+      <stop offset="1" stop-color="#2effc2"/>
+    </linearGradient>
+    <linearGradient id="hdf-bar-top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00c8ff"/>
+      <stop offset="1" stop-color="#1fffcf"/>
+    </linearGradient>
+    <linearGradient id="hdf-bar-bottom" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0ae8c8"/>
+      <stop offset="1" stop-color="#4dff8c"/>
+    </linearGradient>
+  </defs>
+  <circle cx="627" cy="416" r="226" fill="url(#hdf-circle)"/>
+  <rect x="213" y="672" width="828" height="173" fill="url(#hdf-bar-top)"/>
+  <rect x="211" y="898" width="832" height="174" fill="url(#hdf-bar-bottom)"/>
+</svg>

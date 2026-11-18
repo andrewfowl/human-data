@@ -75,7 +75,10 @@ pre {
   top: 0;
   height: 100vh;
 }
-.brand { display: flex; flex-direction: column; gap: .15rem; padding: 0 .5rem; }
+.brand { display: flex; align-items: center; gap: .65rem; padding: 0 .5rem; }
+.brand-text { display: flex; flex-direction: column; gap: .15rem; }
+.logo { flex-shrink: 0; display: block; }
+.auth-title { display: flex; align-items: center; gap: .75rem; }
 .brand strong { font-family: var(--serif); font-size: 1.1rem; }
 .brand span { color: var(--muted); font-size: .8rem; }
 .nav { display: flex; flex-direction: column; gap: .15rem; }

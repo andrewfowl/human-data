@@ -1031,8 +1031,12 @@ def landing():
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Human Data Factory</title>
+<link rel="icon" href="/app/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/app/logo.png">
 <style>
   :root { color-scheme: light dark; }
+  .title { display: flex; align-items: center; gap: .85rem; }
+  .title img { flex-shrink: 0; }
   body { font-family: Georgia, 'Times New Roman', serif; max-width: 44rem;
          margin: 4rem auto; padding: 0 1.25rem; line-height: 1.6;
          background: #faf7f2; color: #1f1b16; }
@@ -1044,7 +1048,7 @@ def landing():
   code { font-family: ui-monospace, monospace; font-size: .9em;
          background: rgba(160,90,44,.12); padding: .1em .35em; border-radius: 4px; }
 </style></head><body>
-<h1>Human Data Factory</h1>
+<h1 class="title"><img src="/app/logo.svg" alt="" width="48" height="48">Human Data Factory</h1>
 <p class="tag">Finance &amp; accounting training datasets, produced under audit-grade internal controls.</p>
 <ul>
   <li>Vetted CPA/CFA experts, qualification-gated by domain track</li>
@@ -1074,6 +1078,11 @@ DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "dashboard"
 @app.get("/app/", include_in_schema=False)
 def dashboard_shell():
     return FileResponse(DASHBOARD_DIR / "index.html", media_type="text/html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(DASHBOARD_DIR / "logo.png", media_type="image/png")
 
 
 app.mount("/app", StaticFiles(directory=DASHBOARD_DIR), name="dashboard")
