@@ -217,7 +217,9 @@ async function renderSignIn() {
 
   const inner = el("div", { class: "auth-inner" },
     el("header", {},
-      el("h1", {}, "Human Data Factory"),
+      el("h1", { class: "auth-title" },
+        el("img", { src: "/app/logo.svg", alt: "", width: "40", height: "40", class: "logo" }),
+        "Human Data Factory"),
       el("p", {}, "Sign in with the API key issued to your account.")));
 
   inner.append(card("Sign in", form({
@@ -271,7 +273,9 @@ function layout(content) {
   const nav = el("nav", { class: "nav", "aria-label": "Primary" },
     navItems().map(([href, text]) => el("a", { href, "aria-current": href.split("/").slice(0, 2).join("/") === current ? "page" : undefined }, text)));
   const sidebar = el("aside", { class: "sidebar" },
-    el("div", { class: "brand" }, el("strong", {}, "Human Data Factory"), el("span", {}, "Finance & accounting")),
+    el("div", { class: "brand" },
+      el("img", { src: "/app/logo.svg", alt: "", width: "32", height: "32", class: "logo" }),
+      el("div", { class: "brand-text" }, el("strong", {}, "Human Data Factory"), el("span", {}, "Finance & accounting"))),
     nav,
     el("div", { class: "whoami" },
       el("div", {}, el("div", {}, me.name), el("div", { class: "muted" }, label(me.role))),
