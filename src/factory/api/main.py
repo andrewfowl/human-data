@@ -61,6 +61,9 @@ app = FastAPI(
                 "(external or embedded Stripe).",
     version="0.4.0",
     lifespan=_lifespan,
+    # Deep links write "#/tag/operation" hashes, which the v0 preview runtime passes to
+    # querySelector and throws on. Expanding operations still works without them.
+    swagger_ui_parameters={"deepLinking": False},
 )
 # Starlette wraps in reverse order: the rate limiter runs first, so replays count too.
 app.add_middleware(IdempotencyMiddleware)
